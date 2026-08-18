@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+      - unlabeled
+  workflow_dispatch:
+    inputs:
+      run_evals:
+        description: "Run routing and trap evals"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run offline tests
+        run: make test
+
+  eval:
+    runs-on: ubuntu-latest
+    needs: test
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'run-evals'))
+    env:
+      NEO4J_URI: bolt://127.0.0.1:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: changeme123
+      NEO4J_AUTH: neo4j/changeme123
+      REPO_ROOT: ${{ runner.temp }}/fastapi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Prepare env file
+        run: cp .env.example .env
+      - name: Clone FastAPI source
+        run: git clone --depth=1 https://github.com/fastapi/fastapi "$REPO_ROOT"
+      - name: Start Neo4j and indexer
+        run: docker compose up --build -d neo4j indexer
+      - name: Index FastAPI
+        run: make index
+      - name: Run evals
+        run: make eval
+      - name: Stop services
+        if: always()
+        run: docker compose down -v

@@ -1,0 +1,229 @@
+services:
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/changeme123}
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "${NEO4J_USER:-neo4j}", "-p", "${NEO4J_PASSWORD:-changeme123}", "RETURN 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PACKAGE: orchestrator
+    ports:
+      - "8001:8001"
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MCP_HOST: ${MCP_HOST:-0.0.0.0}
+      MCP_PORT: "8001"
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-anthropic/claude-sonnet-4.5}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; socket.create_connection(('127.0.0.1', 8001), 2).close()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  indexer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PACKAGE: indexer
+    ports:
+      - "8002:8002"
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MCP_HOST: ${MCP_HOST:-0.0.0.0}
+      MCP_PORT: "8002"
+      NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-changeme123}
+      REPO_URL: ${REPO_URL:-https://github.com/fastapi/fastapi}
+      REPO_ROOT: /repo
+      INDEX_SKIP_TESTS: ${INDEX_SKIP_TESTS:-${INDEXER_SKIP_TESTS:-1}}
+      INDEX_SKIP_DOCS: ${INDEX_SKIP_DOCS:-${INDEXER_SKIP_DOCS:-1}}
+    user: "0:0"
+    volumes:
+      - repo_data:/repo
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; socket.create_connection(('127.0.0.1', 8002), 2).close()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  graph_query:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PACKAGE: graph_query
+    ports:
+      - "8003:8003"
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MCP_HOST: ${MCP_HOST:-0.0.0.0}
+      MCP_PORT: "8003"
+      NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-changeme123}
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; socket.create_connection(('127.0.0.1', 8003), 2).close()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  code_analyst:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PACKAGE: code_analyst
+    ports:
+      - "8004:8004"
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MCP_HOST: ${MCP_HOST:-0.0.0.0}
+      MCP_PORT: "8004"
+      REPO_ROOT: /repo
+      GRAPH_QUERY_MCP_URL: ${GRAPH_QUERY_MCP_URL:-http://graph_query:8003/mcp}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-anthropic/claude-sonnet-4.5}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+    volumes:
+      - repo_data:/repo:ro
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      graph_query:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; socket.create_connection(('127.0.0.1', 8004), 2).close()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  memory:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PACKAGE: memory
+    ports:
+      - "8005:8005"
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MCP_HOST: ${MCP_HOST:-0.0.0.0}
+      MCP_PORT: "8005"
+      MEMORY_DB_PATH: /data/memory.db
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-anthropic/claude-sonnet-4.5}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+    volumes:
+      - memory_data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; socket.create_connection(('127.0.0.1', 8005), 2).close()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PACKAGE: gateway
+    ports:
+      - "8000:8000"
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      GATEWAY_HOST: ${GATEWAY_HOST:-0.0.0.0}
+      GATEWAY_PORT: ${GATEWAY_PORT:-8000}
+      ORCHESTRATOR_MCP_URL: ${ORCHESTRATOR_MCP_URL:-http://orchestrator:8001/mcp}
+      INDEXER_MCP_URL: ${INDEXER_MCP_URL:-http://indexer:8002/mcp}
+      GRAPH_QUERY_MCP_URL: ${GRAPH_QUERY_MCP_URL:-http://graph_query:8003/mcp}
+      CODE_ANALYST_MCP_URL: ${CODE_ANALYST_MCP_URL:-http://code_analyst:8004/mcp}
+      MEMORY_MCP_URL: ${MEMORY_MCP_URL:-http://memory:8005/mcp}
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+      indexer:
+        condition: service_healthy
+      graph_query:
+        condition: service_healthy
+      code_analyst:
+        condition: service_healthy
+      memory:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=15)",
+        ]
+      interval: 10s
+      timeout: 20s
+      retries: 20
+      start_period: 20s
+
+volumes:
+  neo4j_data:
+  repo_data:
+  memory_data:

@@ -1,0 +1,13 @@
+[project]
+name = "memory"
+version = "0.1.0"
+description = "Memory FastMCP server: conversation and retrieval state."
+requires-python = ">=3.12"
+dependencies = [
+    "core",
+    "mcp>=1.28.1,<2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

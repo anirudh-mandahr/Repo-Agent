@@ -1,0 +1,52 @@
+"""Neo4j access. Only indexer and graph_query may open sessions."""
+
+from core.graph.client import WRITE_BATCH_SIZE, GraphClient, GraphSettings, unwind_write
+from core.graph.schema import ensure_schema
+from core.graph.upserts import (
+    delete_file_subtree,
+    upsert_calls,
+    upsert_classes,
+    upsert_contains,
+    upsert_contains_classes,
+    upsert_contains_functions,
+    upsert_contains_methods,
+    upsert_decorators,
+    upsert_depends_on,
+    upsert_docstrings,
+    upsert_files,
+    upsert_functions,
+    upsert_import_depends_on,
+    upsert_imports,
+    upsert_inherits,
+    upsert_meta,
+    upsert_methods,
+    upsert_modules,
+    upsert_parameters,
+)
+
+__all__ = [
+    "WRITE_BATCH_SIZE",
+    "GraphClient",
+    "GraphSettings",
+    "delete_file_subtree",
+    "ensure_schema",
+    "unwind_write",
+    "upsert_meta",
+    "upsert_calls",
+    "upsert_classes",
+    "upsert_contains",
+    "upsert_contains_classes",
+    "upsert_contains_functions",
+    "upsert_contains_methods",
+    "upsert_decorators",
+    "upsert_depends_on",
+    "upsert_docstrings",
+    "upsert_files",
+    "upsert_functions",
+    "upsert_import_depends_on",
+    "upsert_imports",
+    "upsert_inherits",
+    "upsert_methods",
+    "upsert_modules",
+    "upsert_parameters",
+]

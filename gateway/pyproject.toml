@@ -1,0 +1,17 @@
+[project]
+name = "gateway"
+version = "0.1.0"
+description = "FastAPI gateway that fans out to the five MCP agent servers."
+requires-python = ">=3.12"
+dependencies = [
+    "core",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sse-starlette>=2.2",
+    "httpx>=0.28",
+    "mcp>=1.28.1,<2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

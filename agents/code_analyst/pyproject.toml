@@ -1,0 +1,13 @@
+[project]
+name = "code_analyst"
+version = "0.1.0"
+description = "Code analyst FastMCP server: reads source via graph results and the /repo volume."
+requires-python = ">=3.12"
+dependencies = [
+    "core",
+    "mcp>=1.28.1,<2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -1,0 +1,9 @@
+{"query":"What is the FastAPI class?","expected_agents":["graph_query"],"min_agents":1,"expected_mode":"rules"}
+{"query":"What classes inherit from APIRouter?","expected_agents":["graph_query"],"min_agents":1,"expected_mode":"rules"}
+{"query":"How does dependency injection work and show me examples from the codebase","expected_agents":["graph_query","code_analyst"],"min_agents":2,"expected_mode":"llm"}
+{"query":"Compare FastAPI and APIRouter implementations in the codebase","expected_agents":["graph_query","code_analyst"],"min_agents":2,"expected_mode":"llm"}
+{"query":"Explain how get_openapi is implemented and who calls it","expected_agents":["graph_query","code_analyst"],"min_agents":2,"expected_mode":"llm"}
+{"query":"Reindex the repository and explain dependency injection examples in the codebase","expected_agents":["indexer","graph_query","code_analyst"],"min_agents":3,"expected_mode":"llm"}
+{"query":"Reindex the repository and trace how APIRouter imports connect to FastAPI","expected_agents":["indexer","graph_query","code_analyst"],"min_agents":3,"expected_mode":"llm"}
+{"query":"Compare FastAPI and APIRouter implementations, then show who depends on them","expected_agents":["graph_query","code_analyst"],"min_agents":2,"expected_mode":"llm"}
+{"query":"Explain how dependency injection, APIRouter, and get_openapi connect across the codebase","expected_agents":["graph_query","code_analyst"],"min_agents":2,"expected_mode":"llm"}

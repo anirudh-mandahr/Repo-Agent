@@ -1,0 +1,13 @@
+[project]
+name = "indexer"
+version = "0.1.0"
+description = "Indexer FastMCP server: parses the FastAPI repo and writes the knowledge graph."
+requires-python = ">=3.12"
+dependencies = [
+    "core",
+    "mcp>=1.28.1,<2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

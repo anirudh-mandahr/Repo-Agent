@@ -1,0 +1,13 @@
+[project]
+name = "graph_query"
+version = "0.1.0"
+description = "Graph query FastMCP server: read-only Cypher over the knowledge graph."
+requires-python = ">=3.12"
+dependencies = [
+    "core",
+    "mcp>=1.28.1,<2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

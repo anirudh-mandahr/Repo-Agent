@@ -1,0 +1,13 @@
+[project]
+name = "orchestrator"
+version = "0.1.0"
+description = "Orchestrator FastMCP server; MCP client of the other four agents."
+requires-python = ">=3.12"
+dependencies = [
+    "core",
+    "mcp>=1.28.1,<2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

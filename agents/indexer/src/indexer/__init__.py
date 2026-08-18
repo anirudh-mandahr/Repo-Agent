@@ -1,0 +1,1 @@
+"""Indexer FastMCP server package."""
