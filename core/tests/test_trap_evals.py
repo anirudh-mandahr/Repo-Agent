@@ -157,8 +157,10 @@ class _CodeAnalystClientAdapter:
         result = await self._service.compare_implementations(name_a, name_b)
         return result.model_dump(mode="json")
 
-    async def find_patterns(self, pattern: str) -> dict[str, Any]:
-        result = await self._service.find_patterns(pattern)
+    async def find_patterns(
+        self, pattern: str, path_prefix: str | None = None
+    ) -> dict[str, Any]:
+        result = await self._service.find_patterns(pattern, path_prefix=path_prefix)
         return result.model_dump(mode="json")
 
 

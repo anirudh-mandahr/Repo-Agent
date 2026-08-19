@@ -17,6 +17,7 @@ pytestmark = [
 ]
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://127.0.0.1:8000")
+_CHAT_TIMEOUT_S = max(150.0, float(os.environ.get("GATEWAY_CHAT_TIMEOUT_S", "90")) + 30.0)
 
 
 def _post_chat(message: str, *, correlation_id: str, session_id: str) -> dict[str, Any]:
@@ -35,7 +36,7 @@ def _post_chat(message: str, *, correlation_id: str, session_id: str) -> dict[st
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(request, timeout=_CHAT_TIMEOUT_S) as response:
             body = json.loads(response.read().decode("utf-8"))
             body["_status"] = response.status
             return body

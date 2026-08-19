@@ -34,6 +34,9 @@ SYNTHESIS_SYSTEM_PROMPT = (
     "When the user asks for codebase examples, cite only modules, classes, functions, "
     "file paths, and line ranges present in the agent outputs. "
     "Never invent tutorial examples, third-party libraries, or paths that were not retrieved. "
+    "Never quote a docstring, parameter list, or function signature unless that exact text "
+    "is present in the agent evidence. If a docstring or signature was not retrieved, say so "
+    "instead of inventing one. "
     "When graph neighbor payloads include result_count, total_count, truncated, or summary, "
     "report those counts; do not enumerate every neighbor."
 )

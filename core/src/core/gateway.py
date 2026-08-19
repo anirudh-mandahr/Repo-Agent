@@ -21,10 +21,13 @@ from core.exceptions import (
     SchemaValidationError,
     SynthesisError,
 )
+from core.logging import get_logger
 from core.memory import ConversationContext
 from core.observability.ledger import empty_token_totals
 from core.orchestration.models import ExecutionPlan, QueryIntent
 from core.settings import GatewaySettings, OrchestratorSettings
+
+log = get_logger(__name__)
 
 DEFAULT_MAX_MESSAGE_LENGTH = 8000
 DEFAULT_RATE_LIMIT_REQUESTS = 60
@@ -407,6 +410,11 @@ class ChatGatewayService:
         """
         started_at = time.perf_counter()
         settings = self.deps.gateway_settings
+        log.info(
+            "gateway.chat.start",
+            session_id=session_id,
+            correlation_id=correlation_id,
+        )
         streamed_answer = False
         event_queue: asyncio.Queue[ChatEvent | object] = asyncio.Queue()
         _done_sentinel = object()

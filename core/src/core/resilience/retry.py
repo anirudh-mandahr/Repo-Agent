@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from core.exceptions import AgentUnavailableError
 from core.logging import get_logger
@@ -17,6 +18,8 @@ TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
     AgentUnavailableError,
 )
 
+_CANCEL_GRACE_S = 0.25
+
 
 async def await_with_timeout_retry[T](
     factory: Callable[[], Awaitable[T]],
@@ -26,6 +29,11 @@ async def await_with_timeout_retry[T](
     transient: tuple[type[BaseException], ...] = TRANSIENT_ERRORS,
 ) -> T:
     """Await ``factory()`` with a timeout and bounded retry on transient failure.
+
+    ``asyncio.wait_for`` waits for cancelled tasks to finish. MCP streamable-HTTP
+    reads can ignore cancellation (anyio cancel scopes), which would hang the
+    gateway past ``GATEWAY_CHAT_TIMEOUT_S``. This helper abandons a stuck task
+    after a short grace period so the caller can return an error.
 
     Args:
         factory: Zero-argument async callable.
@@ -42,8 +50,26 @@ async def await_with_timeout_retry[T](
     attempts = max(0, retry_count) + 1
     last_exc: BaseException | None = None
     for attempt in range(attempts):
+
+        async def _run() -> T:
+            return await factory()
+
+        task: asyncio.Task[T] = asyncio.create_task(_run())
+        done, _pending = await asyncio.wait({task}, timeout=timeout_s)
+        if task not in done:
+            await _abandon(task)
+            last_exc = TimeoutError(f"timed out after {timeout_s}s")
+            if attempt + 1 >= attempts:
+                raise last_exc
+            log.warning(
+                "mcp.retry",
+                attempt=attempt + 1,
+                retry_count=retry_count,
+                error=str(last_exc),
+            )
+            continue
         try:
-            return await asyncio.wait_for(factory(), timeout=timeout_s)
+            return task.result()
         except transient as exc:
             last_exc = exc
             if attempt + 1 >= attempts:
@@ -56,3 +82,9 @@ async def await_with_timeout_retry[T](
             )
     assert last_exc is not None
     raise last_exc
+
+
+async def _abandon(task: asyncio.Task[Any]) -> None:
+    """Cancel ``task`` without waiting forever for the cancellation to finish."""
+    task.cancel()
+    await asyncio.wait({task}, timeout=_CANCEL_GRACE_S)

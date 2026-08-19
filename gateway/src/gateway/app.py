@@ -342,6 +342,12 @@ def create_app(
     async def chat(payload: ChatRequest, request: Request) -> Response:
         session_id = payload.session_id or new_session_id()
         correlation_id = get_correlation_id()
+        log.info(
+            "gateway.chat",
+            session_id=session_id,
+            correlation_id=correlation_id,
+            stream=payload.stream,
+        )
         service: ChatGatewayService = request.app.state.chat_service
         if payload.stream:
             return EventSourceResponse(

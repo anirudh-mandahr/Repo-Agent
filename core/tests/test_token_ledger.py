@@ -94,3 +94,31 @@ def test_token_ledger_records_model_and_cached_prompt_separately() -> None:
     other.record("corr-sonnet", "routing", sonnet_usage)
     sonnet_cost = float(other.close("corr-sonnet")["cost_usd"])
     assert haiku_cost < sonnet_cost
+
+
+def test_token_ledger_records_analysis_purpose_from_payload() -> None:
+    from core.observability.ledger import usage_from_payload
+
+    ledger = TokenLedger()
+    ledger.open("corr-analysis")
+    usage = TokenUsage(
+        prompt_tokens=200,
+        completion_tokens=40,
+        total_tokens=240,
+        model="anthropic/claude-sonnet-4.5",
+    )
+    assert ledger.record_payload(
+        "corr-analysis",
+        {"qualified_name": "fastapi.FastAPI", "explanation": "ok", "usage": usage},
+        purpose="analysis",
+    )
+    closed = ledger.close("corr-analysis")
+    assert closed["total"] == 240
+    assert closed["llm_calls"] == 1
+    assert closed["by_purpose"]["analysis"]["total"] == 240
+    assert closed["by_purpose"]["analysis"]["llm_calls"] == 1
+    assert float(closed["cost_usd"]) > 0
+    assert usage_from_payload({"explanation": "ok"}) is None
+    zero = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    assert usage_from_payload({"usage": zero}) is None
+    assert usage_from_payload(object()) is None

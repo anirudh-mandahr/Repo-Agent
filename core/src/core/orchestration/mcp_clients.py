@@ -326,18 +326,23 @@ class PooledOrchestratorClients:
             correlation_id=self._correlation_id,
         )
 
-    async def find_patterns(self, pattern: str) -> Any:
+    async def find_patterns(
+        self,
+        pattern: str,
+        path_prefix: str | None = None,
+    ) -> Any:
         """Find supported code patterns.
 
         Args:
             pattern: Pattern name.
+            path_prefix: Optional module or file-path prefix for decorator scoping.
 
         Returns:
             Pattern payload.
         """
         return await self._code.call(
             "find_patterns",
-            {"pattern": pattern},
+            {"pattern": pattern, "path_prefix": path_prefix},
             correlation_id=self._correlation_id,
         )
 

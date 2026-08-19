@@ -326,16 +326,21 @@ class CodeAnalystClientAdapter:
         result = await self._service.compare_implementations(name_a, name_b)
         return result.model_dump(mode="json")
 
-    async def find_patterns(self, pattern: str) -> dict[str, Any]:
+    async def find_patterns(
+        self,
+        pattern: str,
+        path_prefix: str | None = None,
+    ) -> dict[str, Any]:
         """Find instances of a named pattern.
 
         Args:
             pattern: Pattern name.
+            path_prefix: Optional module or file-path prefix for decorator scoping.
 
         Returns:
             Pattern payload.
         """
-        result = await self._service.find_patterns(pattern)
+        result = await self._service.find_patterns(pattern, path_prefix=path_prefix)
         return result.model_dump(mode="json")
 
 
@@ -501,16 +506,21 @@ class StubCodeAnalystClient:
         """
         return {"name_a": name_a, "name_b": name_b, "summary": f"compared {name_a} and {name_b}"}
 
-    async def find_patterns(self, pattern: str) -> dict[str, Any]:
+    async def find_patterns(
+        self,
+        pattern: str,
+        path_prefix: str | None = None,
+    ) -> dict[str, Any]:
         """Return a stub pattern result.
 
         Args:
             pattern: Pattern name.
+            path_prefix: Optional module or file-path prefix for decorator scoping.
 
         Returns:
             Pattern payload.
         """
-        return {"pattern": pattern, "instances": []}
+        return {"pattern": pattern, "path_prefix": path_prefix, "instances": []}
 
 
 def orchestrator_clients(

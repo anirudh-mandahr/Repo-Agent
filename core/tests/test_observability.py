@@ -28,6 +28,7 @@ def test_budget_and_synthesis_metrics_are_declared() -> None:
         record_budget_exhausted,
         record_evidence_only,
         record_synthesis_latency,
+        record_synthesis_window,
         record_ttft,
     )
 
@@ -35,11 +36,14 @@ def test_budget_and_synthesis_metrics_are_declared() -> None:
     record_ttft(0.05)
     record_budget_exhausted("tokens")
     record_evidence_only()
+    record_synthesis_window(synthesis_timeout_s=18.0, plan_duration_s=35.0)
     text = render_metrics().decode("utf-8")
     assert "repochat_synthesis_duration_seconds" in text
     assert "repochat_time_to_first_token_seconds" in text
     assert "repochat_budget_exhausted_total" in text
     assert "repochat_evidence_only_total" in text
+    assert "repochat_synthesis_timeout_seconds" in text
+    assert "repochat_plan_duration_seconds" in text
 
 
 def test_inject_trace_carrier_includes_correlation_id() -> None:

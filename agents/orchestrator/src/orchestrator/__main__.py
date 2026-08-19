@@ -169,6 +169,7 @@ async def handle_query(
 ) -> dict[str, Any]:
     """Gateway-facing tool: run the full orchestrator loop."""
     correlation_id = bind_mcp_context(ctx)
+    log.info("orchestrator.handle_query", correlation_id=correlation_id)
     pool = get_mcp_pool()
     _service._breakers = pool.breakers
     clients = cast(

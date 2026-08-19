@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from pydantic.json_schema import SkipJsonSchema
+
+from core.llm.provider import TokenUsage
 
 
 class FunctionAnalysis(BaseModel):
@@ -17,6 +20,12 @@ class FunctionAnalysis(BaseModel):
     module: str | None = None
     class_name: str | None = None
     error: str | None = None
+    usage: SkipJsonSchema[TokenUsage | None] = None
+
+    @field_validator("usage", mode="before")
+    @classmethod
+    def _coerce_usage(cls, value: object) -> TokenUsage | None:
+        return coerce_analyst_usage(value)
 
 
 class ClassAnalysis(BaseModel):
@@ -30,6 +39,12 @@ class ClassAnalysis(BaseModel):
     decorators: list[str] = Field(default_factory=list)
     module: str | None = None
     error: str | None = None
+    usage: SkipJsonSchema[TokenUsage | None] = None
+
+    @field_validator("usage", mode="before")
+    @classmethod
+    def _coerce_usage(cls, value: object) -> TokenUsage | None:
+        return coerce_analyst_usage(value)
 
 
 class PatternInstance(BaseModel):
@@ -46,9 +61,16 @@ class PatternAnalysis(BaseModel):
     """LLM explanation of pattern instances, or a structured unknown-pattern error."""
 
     pattern: str
+    summary: str = ""
     instances: list[PatternInstance] = Field(default_factory=list)
     error: str | None = None
     supported_patterns: list[str] = Field(default_factory=list)
+    usage: SkipJsonSchema[TokenUsage | None] = None
+
+    @field_validator("usage", mode="before")
+    @classmethod
+    def _coerce_usage(cls, value: object) -> TokenUsage | None:
+        return coerce_analyst_usage(value)
 
 
 class SnippetResult(BaseModel):
@@ -67,6 +89,12 @@ class ImplementationExplanation(BaseModel):
     qualified_name: str
     explanation: str = ""
     error: str | None = None
+    usage: SkipJsonSchema[TokenUsage | None] = None
+
+    @field_validator("usage", mode="before")
+    @classmethod
+    def _coerce_usage(cls, value: object) -> TokenUsage | None:
+        return coerce_analyst_usage(value)
 
 
 class ImplementationComparison(BaseModel):
@@ -78,3 +106,29 @@ class ImplementationComparison(BaseModel):
     similarities: list[str] = Field(default_factory=list)
     differences: list[str] = Field(default_factory=list)
     error: str | None = None
+    usage: SkipJsonSchema[TokenUsage | None] = None
+
+    @field_validator("usage", mode="before")
+    @classmethod
+    def _coerce_usage(cls, value: object) -> TokenUsage | None:
+        return coerce_analyst_usage(value)
+
+
+def coerce_analyst_usage(value: object) -> TokenUsage | None:
+    """Accept a ``TokenUsage`` payload and drop malformed LLM extras.
+
+    Args:
+        value: Inbound usage object, mapping, or junk from a structured LLM.
+
+    Returns:
+        A validated :class:`TokenUsage`, or ``None`` when the value is absent
+        or not usable.
+    """
+    if value is None:
+        return None
+    if isinstance(value, TokenUsage):
+        return value
+    try:
+        return TokenUsage.model_validate(value)
+    except (TypeError, ValueError):
+        return None

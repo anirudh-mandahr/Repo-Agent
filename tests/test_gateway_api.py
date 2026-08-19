@@ -222,7 +222,9 @@ class _GatewayCodeAnalyst:
     async def compare_implementations(self, name_a: str, name_b: str) -> object:
         return {"name_a": name_a, "name_b": name_b, "summary": "compared", "error": None}
 
-    async def find_patterns(self, pattern: str) -> object:
+    async def find_patterns(
+        self, pattern: str, path_prefix: str | None = None
+    ) -> object:
         return {"pattern": pattern, "instances": [], "error": None}
 
 

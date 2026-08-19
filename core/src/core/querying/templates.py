@@ -17,13 +17,33 @@ FIND_ENTITY = dedent(
        OR (n:File AND n.path = $name)
     WITH n, labels(n) AS labels
     WHERE $entity_type IS NULL OR $entity_type IN labels
+    OPTIONAL MATCH (n)-[:DOCUMENTED_BY]->(d:Docstring)
     RETURN labels AS labels,
            n.name AS name,
            n.qualified_name AS qualified_name,
            n.file_path AS file_path,
            n.path AS path,
            n.line_start AS line_start,
-           n.line_end AS line_end
+           n.line_end AS line_end,
+           d.text AS docstring_text,
+           d.summary AS docstring_summary
+    """
+).strip()
+
+GET_DOCSTRING = dedent(
+    """\
+    MATCH (n)
+    WHERE (n:Module OR n:Class OR n:Function OR n:Method)
+      AND (n.qualified_name = $qualified_name OR n.name = $qualified_name)
+    OPTIONAL MATCH (n)-[:DOCUMENTED_BY]->(d:Docstring)
+    RETURN labels(n) AS labels,
+           n.name AS name,
+           n.qualified_name AS qualified_name,
+           n.file_path AS file_path,
+           n.line_start AS line_start,
+           n.line_end AS line_end,
+           d.text AS text,
+           d.summary AS summary
     """
 ).strip()
 
@@ -31,16 +51,39 @@ FIND_IMPORTED_NAME = dedent(
     """\
     MATCH (m:Module)-[:IMPORTS]->(i:Import)
     WHERE $name IN i.names OR i.alias = $name
-    WITH m
-    WHERE $entity_type IS NULL OR $entity_type IN ['Class', 'Module', 'Function']
-    RETURN ['Class'] AS labels,
-           $name AS name,
-           m.qualified_name + '.' + $name AS qualified_name,
-           m.file_path AS file_path,
+    OPTIONAL MATCH (target)
+    WHERE (target:Module OR target:Class OR target:Function OR target:Method)
+      AND target.name = $name
+      AND (
+            target.qualified_name = i.module + '.' + $name
+            OR (
+                i.module STARTS WITH '.'
+                AND size(i.module) > 1
+                AND target.qualified_name ENDS WITH ltrim(i.module, '.') + '.' + $name
+            )
+          )
+    WITH collect(DISTINCT target) AS resolved, collect(DISTINCT m) AS importers
+    WITH resolved,
+         importers,
+         [mod IN importers WHERE mod.file_path STARTS WITH 'fastapi/'] AS local_importers
+    WITH size(resolved) > 0 AS exact,
+         CASE
+           WHEN size(resolved) > 0 THEN resolved
+           WHEN size(local_importers) > 0 THEN local_importers
+           ELSE importers
+         END AS hits
+    UNWIND hits AS hit
+    WITH DISTINCT hit, exact
+    WHERE $entity_type IS NULL OR $entity_type IN labels(hit)
+    RETURN labels(hit) AS labels,
+           hit.name AS name,
+           hit.qualified_name AS qualified_name,
+           hit.file_path AS file_path,
            null AS path,
-           m.line_start AS line_start,
-           m.line_end AS line_end,
-           1.0 AS score
+           hit.line_start AS line_start,
+           hit.line_end AS line_end,
+           CASE WHEN exact THEN 1.0 ELSE 0.6 END AS score
+    ORDER BY score DESC, size(coalesce(hit.file_path, ''))
     """
 ).strip()
 
@@ -275,7 +318,8 @@ FIND_FULLTEXT = dedent(
       AND (n:Module OR n:Class OR n:Function OR n:Method)
       AND ($entity_type IS NULL OR $entity_type IN labels(n))
     WITH n, max(score) AS score
-    WITH n, score,
+    OPTIONAL MATCH (n)-[:DOCUMENTED_BY]->(d:Docstring)
+    WITH n, score, d,
          CASE
            WHEN n.file_path STARTS WITH 'tests/' OR n.file_path CONTAINS '/tests/' THEN 2
            WHEN n.file_path STARTS WITH 'docs_src/' OR n.file_path CONTAINS '/docs_src/' THEN 1
@@ -288,7 +332,9 @@ FIND_FULLTEXT = dedent(
            n.path AS path,
            n.line_start AS line_start,
            n.line_end AS line_end,
-           score AS score
+           score AS score,
+           d.text AS docstring_text,
+           d.summary AS docstring_summary
     ORDER BY source_rank, score DESC
     LIMIT $top_k
     """
@@ -302,6 +348,7 @@ VECTOR_SEARCH = dedent(
     WHERE ($entity_type IS NULL OR $entity_type IN labels(node))
       AND (node:Class OR node:Function OR node:Method)
       AND score >= $min_score
+    OPTIONAL MATCH (node)-[:DOCUMENTED_BY]->(d:Docstring)
     RETURN labels(node) AS labels,
            node.name AS name,
            node.qualified_name AS qualified_name,
@@ -309,7 +356,9 @@ VECTOR_SEARCH = dedent(
            node.path AS path,
            node.line_start AS line_start,
            node.line_end AS line_end,
-           score AS score
+           score AS score,
+           d.text AS docstring_text,
+           d.summary AS docstring_summary
     ORDER BY score DESC
     LIMIT $top_k
     """

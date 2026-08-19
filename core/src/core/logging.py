@@ -50,10 +50,23 @@ def correlation_id_from_mcp_meta(meta: object | None) -> str | None:
     """
     if meta is None:
         return None
-    raw = getattr(meta, "correlation_id", None)
-    extra = getattr(meta, "model_extra", None)
-    if raw is None and isinstance(extra, dict):
-        raw = extra.get("correlation_id")
+    raw: object | None = None
+    if isinstance(meta, dict):
+        raw = meta.get("correlation_id")
+        nested = meta.get("_meta")
+        if raw is None and isinstance(nested, dict):
+            raw = nested.get("correlation_id")
+    else:
+        raw = getattr(meta, "correlation_id", None)
+        extra = getattr(meta, "model_extra", None)
+        if raw is None and isinstance(extra, dict):
+            raw = extra.get("correlation_id")
+        if raw is None:
+            dumped = getattr(meta, "model_dump", None)
+            if callable(dumped):
+                payload = dumped()
+                if isinstance(payload, dict):
+                    raw = payload.get("correlation_id")
     if raw is None:
         return None
     text = str(raw).strip()

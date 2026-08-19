@@ -274,11 +274,16 @@ class CodeAnalystClient(Protocol):
         """
         ...
 
-    async def find_patterns(self, pattern: str) -> Any:
+    async def find_patterns(
+        self,
+        pattern: str,
+        path_prefix: str | None = None,
+    ) -> Any:
         """Find supported code patterns.
 
         Args:
             pattern: Pattern name.
+            path_prefix: Optional module or file-path prefix for decorator scoping.
 
         Returns:
             Pattern payload.

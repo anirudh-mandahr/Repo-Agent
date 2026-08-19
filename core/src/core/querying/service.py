@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, NamedTuple, Protocol, cast
 
 from pydantic import BaseModel, Field
 
@@ -30,6 +30,7 @@ from core.querying.templates import (
     GET_DEPENDENCIES_COUNT,
     GET_DEPENDENTS,
     GET_DEPENDENTS_COUNT,
+    GET_DOCSTRING,
     TRACE_IMPORTS,
     VECTOR_SEARCH,
 )
@@ -108,8 +109,41 @@ _SOURCE_PRIORITY_PACKAGE = 0
 _SOURCE_PRIORITY_DOCS = 1
 _SOURCE_PRIORITY_TESTS = 2
 _PACKAGE_LOCAL_PREFIXES = ("fastapi/", "fastapi.")
-_DI_CONCEPT_TERMS = ("injection", "resolution", "inject", "injecting", "resolving")
-_DI_ENTITY_NAMES = ("Depends", "get_dependant", "solve_dependencies")
+
+
+class _ConceptEntry(NamedTuple):
+    """One conceptual question family mapped onto concrete graph identifiers."""
+
+    all_of: tuple[str, ...]
+    any_of: tuple[str, ...]
+    entities: tuple[str, ...]
+
+
+_CONCEPT_ENTITIES: tuple[_ConceptEntry, ...] = (
+    _ConceptEntry(
+        all_of=("dependenc",),
+        any_of=("injection", "resolution", "inject", "injecting", "resolving"),
+        entities=("Depends", "get_dependant", "solve_dependencies"),
+    ),
+    _ConceptEntry(
+        all_of=("request", "lifecycle"),
+        any_of=(),
+        entities=(
+            "APIRoute.get_request_handler",
+            "run_endpoint_function",
+            "serialize_response",
+        ),
+    ),
+    _ConceptEntry(
+        all_of=("request", "validation"),
+        any_of=(),
+        entities=(
+            "request_params_to_args",
+            "request_body_to_args",
+            "RequestValidationError",
+        ),
+    ),
+)
 
 
 def source_priority(file_path: str | None) -> int:
@@ -212,8 +246,8 @@ def retrieval_sort_key(
 def conceptual_entity_names(query: str) -> list[str]:
     """Return extra identifier lookups for conceptual questions.
 
-    Dependency injection/resolution questions should also hit ``Depends`` and
-    the resolver helpers in ``fastapi/dependencies/utils.py``.
+    Maps question families onto concrete graph names so retrieval is not stuck
+    on un-extractable wording such as "request validation" or "request lifecycle".
 
     Args:
         query: User query or lookup phrase.
@@ -223,17 +257,19 @@ def conceptual_entity_names(query: str) -> list[str]:
         one of those identifiers.
     """
     lowered = query.lower()
-    if "dependenc" not in lowered:
-        return []
-    if not any(term in lowered for term in _DI_CONCEPT_TERMS):
-        return []
     extra: list[str] = []
     seen: set[str] = {query.strip().lower()}
-    for name in _DI_ENTITY_NAMES:
-        if name.lower() in seen:
+    for concept in _CONCEPT_ENTITIES:
+        if not all(term in lowered for term in concept.all_of):
             continue
-        seen.add(name.lower())
-        extra.append(name)
+        if concept.any_of and not any(term in lowered for term in concept.any_of):
+            continue
+        for name in concept.entities:
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            extra.append(name)
     return extra
 
 
@@ -306,6 +342,8 @@ class EntityHit(BaseModel):
     line_end: int | None = None
     tier: RetrievalTier = "exact"
     score: float = 1.0
+    docstring_text: str | None = None
+    docstring_summary: str | None = None
 
 
 class EntityQueryResult(BaseModel):
@@ -316,6 +354,28 @@ class EntityQueryResult(BaseModel):
     truncated: bool = False
     error: str | None = None
     valid_types: list[str] = Field(default_factory=lambda: list(FIND_ENTITY_LABELS))
+
+
+class DocstringHit(BaseModel):
+    """Indexed docstring text attached to a Module, Class, Function, or Method."""
+
+    entity_type: str
+    name: str = ""
+    qualified_name: str = ""
+    file_path: str = ""
+    line_start: int | None = None
+    line_end: int | None = None
+    text: str = ""
+    summary: str = ""
+
+
+class DocstringResult(BaseModel):
+    """Result of ``get_docstring``."""
+
+    qualified_name: str
+    matches: list[DocstringHit] = Field(default_factory=list)
+    result_count: int = 0
+    truncated: bool = False
 
 
 class NeighborHit(BaseModel):
@@ -434,6 +494,42 @@ class GraphQueryService:
             EntityQueryResult.
         """
         return self.retrieve(name, entity_type=entity_type)
+
+    def get_docstring(self, qualified_name: str) -> DocstringResult:
+        """Return indexed docstring text for ``qualified_name`` or a short name.
+
+        Args:
+            qualified_name: Graph qualified name or entity ``name``.
+
+        Returns:
+            DocstringResult.
+        """
+        result = self.execute_query(
+            GET_DOCSTRING,
+            {"qualified_name": qualified_name},
+        )
+        matches = [_docstring_hit(row) for row in result.rows]
+        matches.sort(
+            key=lambda hit: retrieval_sort_key(
+                "exact",
+                hit.file_path,
+                1.0,
+                name=hit.name,
+                qualified_name=hit.qualified_name,
+            )
+        )
+        log.info(
+            "query.get_docstring",
+            qualified_name=qualified_name,
+            result_count=len(matches),
+            truncated=result.truncated,
+        )
+        return DocstringResult(
+            qualified_name=qualified_name,
+            matches=matches,
+            result_count=len(matches),
+            truncated=result.truncated,
+        )
 
     def retrieve(
         self,
@@ -846,6 +942,24 @@ def _entity_hit(
         line_end=_opt_int(row.get("line_end")),
         tier=resolved_tier,
         score=float(resolved_score),
+        docstring_text=_opt_str(row.get("docstring_text")),
+        docstring_summary=_opt_str(row.get("docstring_summary")),
+    )
+
+
+def _docstring_hit(row: Mapping[str, Any]) -> DocstringHit:
+    labels = _str_list(row.get("labels"))
+    qualified_name = str(row.get("qualified_name") or "")
+    name = str(row.get("name") or qualified_name)
+    return DocstringHit(
+        entity_type=_primary_label(labels) or str(row.get("entity_type") or ""),
+        name=name,
+        qualified_name=qualified_name,
+        file_path=str(row.get("file_path") or ""),
+        line_start=_opt_int(row.get("line_start")),
+        line_end=_opt_int(row.get("line_end")),
+        text=str(row.get("text") or ""),
+        summary=str(row.get("summary") or ""),
     )
 
 
@@ -1036,6 +1150,8 @@ __all__ = [
     "DEFAULT_RETRIEVAL_TOP_K",
     "DEFAULT_TRACE_DEPTH",
     "READ_TIMEOUT_S",
+    "DocstringHit",
+    "DocstringResult",
     "EntityHit",
     "EntityQueryResult",
     "GraphQueryService",
@@ -1047,6 +1163,7 @@ __all__ = [
     "RelatedHit",
     "RelatedQueryResult",
     "RetrievalTier",
+    "conceptual_entity_names",
     "lucene_query",
     "package_local_priority",
     "path_name_affinity",

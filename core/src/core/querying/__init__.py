@@ -8,6 +8,8 @@ from core.querying.embeddings import (
 from core.querying.patterns import PATTERN_TEMPLATES, SUPPORTED_PATTERNS, pattern_cypher
 from core.querying.safety import QueryRejected, guard_readonly
 from core.querying.service import (
+    DocstringHit,
+    DocstringResult,
     EntityHit,
     EntityQueryResult,
     GraphQueryService,
@@ -18,6 +20,7 @@ from core.querying.service import (
     QueryResult,
     RelatedHit,
     RelatedQueryResult,
+    conceptual_entity_names,
     lucene_query,
     package_local_priority,
     path_name_affinity,
@@ -31,6 +34,8 @@ __all__ = [
     "PATTERN_TEMPLATES",
     "SUPPORTED_PATTERNS",
     "EmbeddingProvider",
+    "DocstringHit",
+    "DocstringResult",
     "EntityHit",
     "EntityQueryResult",
     "GraphQueryService",
@@ -43,6 +48,7 @@ __all__ = [
     "QueryResult",
     "RelatedHit",
     "RelatedQueryResult",
+    "conceptual_entity_names",
     "default_embedding_provider",
     "guard_readonly",
     "lucene_query",

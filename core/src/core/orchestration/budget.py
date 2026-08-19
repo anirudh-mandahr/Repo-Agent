@@ -59,6 +59,8 @@ class RequestBudget:
     max_synthesis_timeout_s: float
     synthesis_reserve_s: float = 0.0
     exhausted: BudgetCeiling | None = None
+    started_monotonic: float = 0.0
+    plan_duration_s: float = 0.0
     _base_synthesis_reserve_s: float = 0.0
     _clock: Callable[[], float] = field(default=time.monotonic, repr=False, compare=False)
 
@@ -110,6 +112,7 @@ class RequestBudget:
             min_synthesis_timeout_s=max(0.0, settings.synthesis_min_timeout_s),
             max_synthesis_timeout_s=max(0.0, settings.synthesis_timeout_s),
             synthesis_reserve_s=reserve,
+            started_monotonic=started,
             _base_synthesis_reserve_s=reserve,
             _clock=tick,
         )
@@ -125,6 +128,20 @@ class RequestBudget:
         """
         current = now if now is not None else self._clock()
         return max(0.0, self.deadline_monotonic - current)
+
+    def elapsed_s(self, now: float | None = None) -> float:
+        """Seconds elapsed since the request budget started.
+
+        Args:
+            now: Optional monotonic timestamp.
+
+        Returns:
+            Non-negative elapsed seconds, or ``0`` when start was not recorded.
+        """
+        if self.started_monotonic <= 0.0:
+            return 0.0
+        current = now if now is not None else self._clock()
+        return max(0.0, current - self.started_monotonic)
 
     def specialist_remaining_s(self, now: float | None = None) -> float:
         """Seconds the plan phase may still spend on specialist calls.

@@ -8,11 +8,15 @@ import pytest
 from core.exceptions import RoutingError
 from core.llm.stub import StubProvider
 from core.memory import ConversationContext, ConversationTurn
+from core.orchestration.evidence import _broader_terms, evaluate_evidence, refine_plan
 from core.orchestration.executor import _select_analysis_candidates, run_plan
-from core.orchestration.models import ExecutionPlan, QueryIntent
+from core.orchestration.models import AgentOutput, ExecutionPlan, QueryIntent
 from core.orchestration.router import (
+    _rule_based_entities,
     fallback_target_agents,
+    intent_from_rule_result,
     normalize_grounded_intent,
+    resolve_entities,
     retrieval_search_terms,
     route_to_agents,
     rule_based_route,
@@ -115,7 +119,7 @@ class _CodeAnalystClient:
         self.analyze_calls: list[str] = []
         self.analyze_class_calls: list[str] = []
         self.compare_calls: list[tuple[str, str]] = []
-        self.pattern_calls: list[str] = []
+        self.pattern_calls: list[tuple[str, str | None]] = []
 
     async def get_code_snippet(
         self,
@@ -158,9 +162,16 @@ class _CodeAnalystClient:
         self.compare_calls.append((name_a, name_b))
         return {"name_a": name_a, "name_b": name_b, "summary": "compared", "error": None}
 
-    async def find_patterns(self, pattern: str) -> object:
-        self.pattern_calls.append(pattern)
-        return {"pattern": pattern, "instances": [], "error": None}
+    async def find_patterns(
+        self, pattern: str, path_prefix: str | None = None
+    ) -> object:
+        self.pattern_calls.append((pattern, path_prefix))
+        return {
+            "pattern": pattern,
+            "path_prefix": path_prefix,
+            "instances": [],
+            "error": None,
+        }
 
 
 class _IndexerClient:
@@ -354,7 +365,7 @@ async def test_cache_hit_skips_llm_calls() -> None:
 
     # cache_key = orchestrator:v1:{index_version}:{session_id}:{normalized_query}:{entities}
     normalized = "compare fastapi"
-    expected_cache_key = f"orchestrator:v1:idx-2:session-1:{normalized}:Compare,FastAPI"
+    expected_cache_key = f"orchestrator:v1:idx-2:session-1:{normalized}:FastAPI"
 
     cached = SimpleNamespace(
         response_json={
@@ -534,7 +545,7 @@ def test_rule_based_route_extracts_entities_for_dependency_injection_queries() -
 
     assert route.ambiguous is True
     assert route.target_agents == []
-    assert set(route.matched_rules) == {"explain", "examples"}
+    assert set(route.matched_rules) == {"examples", "pattern"}
 
 
 def test_rule_based_route_uses_graph_only_for_simple_lookup() -> None:
@@ -583,7 +594,7 @@ def test_rule_based_route_uses_three_agents_for_index_plus_analysis() -> None:
     )
 
     assert route.ambiguous is True
-    assert set(route.matched_rules) == {"index", "explain", "examples"}
+    assert set(route.matched_rules) == {"index", "examples", "pattern"}
     assert fallback_target_agents(
         "Reindex the repository and explain dependency injection examples in the codebase"
     ) == ["indexer", "graph_query", "code_analyst"]
@@ -1102,8 +1113,121 @@ async def test_pattern_query_invokes_find_patterns() -> None:
     )
 
     assert result.metadata["routing_mode"] == "rules"
-    assert code_analyst.pattern_calls == ["decorator"]
+    assert code_analyst.pattern_calls == [("decorator", None)]
     assert result.metadata["tools_invoked"] == ["code_analyst.find_patterns"]
+
+
+def test_rule_based_entities_does_not_treat_find_as_entity() -> None:
+    query = "Find all decorators used in the routing module"
+    entities = _rule_based_entities(query)
+    assert "Find" not in entities
+    terms = retrieval_search_terms(query, entities)
+    assert terms != ["Find"]
+    assert "Find" not in terms
+
+
+def test_rule_based_entities_extracts_snake_case_identifiers() -> None:
+    assert _rule_based_entities("Where is get_openapi?") == ["get_openapi"]
+    assert "solve_dependencies" in _rule_based_entities("Explain solve_dependencies")
+
+
+def test_rule_based_entities_ignores_plain_prose_words() -> None:
+    assert _rule_based_entities("show me examples of that from the codebase") == []
+
+
+def test_snake_case_entity_carries_into_follow_up_turn() -> None:
+    context = ConversationContext(
+        recent_turns=[
+            ConversationTurn(
+                id=1,
+                role="user",
+                content="Where is get_openapi?",
+                created_at="2026-01-01T00:00:00Z",
+                token_estimate=10,
+            )
+        ]
+    )
+    resolved = resolve_entities(
+        "Explain how that is implemented in the codebase", [], context
+    )
+    assert resolved == ["get_openapi"]
+
+
+def test_find_decorators_in_routing_module_routes_to_pattern() -> None:
+    query = "Find all decorators used in the routing module"
+    route = rule_based_route(query)
+
+    assert route.ambiguous is False
+    assert route.target_agents == ["code_analyst"]
+    assert "pattern" in route.matched_rules
+    intent = intent_from_rule_result(query, route)
+    assert intent.intent == "pattern"
+    assert "Find" not in intent.entities
+
+
+def test_design_patterns_why_prefers_pattern_over_explain() -> None:
+    query = "What design patterns are used in FastAPI's core and why?"
+    route = rule_based_route(query)
+
+    assert route.ambiguous is False
+    assert route.target_agents == ["code_analyst"]
+    assert route.matched_rules == ["pattern"]
+    intent = intent_from_rule_result(query, route)
+    assert intent.intent == "pattern"
+
+
+def test_pattern_vocab_matches_supported_patterns() -> None:
+    decorator = rule_based_route("Find all decorators")
+    assert decorator.ambiguous is False
+    assert "pattern" in decorator.matched_rules
+
+    factories = rule_based_route("show factories")
+    assert factories.ambiguous is False
+    assert "pattern" in factories.matched_rules
+
+    di = rule_based_route("Where is dependency injection used?")
+    assert di.ambiguous is False
+    assert "pattern" in di.matched_rules
+
+
+@pytest.mark.asyncio
+async def test_find_decorators_in_routing_invokes_scoped_find_patterns() -> None:
+    llm = StubProvider(["FINAL ANSWER"])
+    settings = OrchestratorSettings(routing_strategy="rules_first")
+    service = OrchestratorService(llm, settings=settings)
+    code_analyst = _CodeAnalystClient()
+    graph_query = _GraphQueryClient(index_version="idx-1")
+    result = await service.handle_query(
+        "Find all decorators used in the routing module",
+        "session-1",
+        clients=_clients(graph_query=graph_query, code_analyst=code_analyst),  # type: ignore[arg-type]
+        correlation_id="corr-decorators-routing",
+    )
+
+    assert result.metadata["routing_mode"] == "rules"
+    assert code_analyst.pattern_calls == [("decorator", "routing.py")]
+    assert result.metadata["tools_invoked"] == ["code_analyst.find_patterns"]
+    assert graph_query.find_entity_calls == []
+    assert [call.purpose for call in llm.calls] == ["synthesis"]
+
+
+@pytest.mark.asyncio
+async def test_design_patterns_query_invokes_find_patterns() -> None:
+    llm = StubProvider(["FINAL ANSWER"])
+    settings = OrchestratorSettings(routing_strategy="rules_first")
+    service = OrchestratorService(llm, settings=settings)
+    code_analyst = _CodeAnalystClient()
+    result = await service.handle_query(
+        "What design patterns are used in FastAPI's core and why?",
+        "session-1",
+        clients=_clients(code_analyst=code_analyst),  # type: ignore[arg-type]
+        correlation_id="corr-design-patterns",
+    )
+
+    assert result.metadata["routing_mode"] == "rules"
+    assert code_analyst.pattern_calls == [("decorator", None)]
+    assert "code_analyst.find_patterns" in result.metadata["tools_invoked"]
+    assert [call.purpose for call in llm.calls] == ["synthesis"]
 
 
 @pytest.mark.asyncio
@@ -1337,6 +1461,26 @@ async def test_await_with_timeout_retry_retries_once() -> None:
     result = await await_with_timeout_retry(flaky, timeout_s=1.0, retry_count=1)
     assert result == "ok"
     assert attempts["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_await_with_timeout_retry_abandons_uncancellable_task() -> None:
+    from core.resilience.retry import await_with_timeout_retry
+
+    started = asyncio.Event()
+
+    async def swallows_cancel() -> str:
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.4)
+        return "late"
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        await await_with_timeout_retry(swallows_cancel, timeout_s=0.05, retry_count=0)
+    assert started.is_set()
+    await asyncio.sleep(0.5)
 
 
 @pytest.mark.asyncio
@@ -2146,5 +2290,157 @@ async def test_skipped_agents_recorded_when_budget_blocks_specialists() -> None:
     )
     skipped = {item["agent"]: item["reason"] for item in result.metadata.get("skipped_agents", [])}
     assert "graph_query" in skipped or "code_analyst" in skipped
+
+
+_DI_QUERY = "How does dependency injection work and show me examples from the codebase"
+_GENERIC_TOKENS = frozenset({"work", "examples", "codebase", "handle", "validation"})
+
+
+def _graph_hit_output(queried: list[str], *, file_path: str = "fastapi/params.py") -> AgentOutput:
+    matches = [
+        {
+            "qualified_name": "fastapi.params.Depends",
+            "file_path": file_path,
+            "name": "Depends",
+        }
+    ]
+    return AgentOutput(
+        agent="graph_query",
+        ok=True,
+        output={
+            "entities": [{"matches": matches, "result_count": 1}],
+            "queried_entities": queried,
+            "candidates": matches,
+        },
+        tools_invoked=["graph_query.find_entity"],
+    )
+
+
+def test_refinement_keeps_conceptual_full_query_term() -> None:
+    terms = retrieval_search_terms(_DI_QUERY, [])
+    intent = QueryIntent(
+        routing_mode="rules",
+        intent="explanation",
+        entities=[],
+        target_agents=["graph_query", "code_analyst"],
+        reasoning="explain",
+    )
+    plan = ExecutionPlan(
+        routing_mode="rules",
+        intent=intent,
+        agents=["graph_query", "code_analyst"],
+        search_terms=terms,
+        iteration=1,
+    )
+    outputs = {
+        "graph_query": _graph_hit_output(terms),
+        "code_analyst": AgentOutput(
+            agent="code_analyst",
+            ok=False,
+            error="code_analyst timeout",
+            degraded_note="code_analyst unavailable/timeout; returning graph facts only",
+            tools_invoked=[
+                "code_analyst.explain_implementation",
+                "code_analyst.analyze_function",
+                "code_analyst.get_code_snippet",
+            ],
+        ),
+    }
+    assessment = evaluate_evidence(_DI_QUERY, plan, outputs)
+    follow_up = refine_plan(_DI_QUERY, plan, assessment)
+
+    assert assessment.sufficient is False
+    assert follow_up is not None
+    assert follow_up.search_terms is not None
+    assert any(
+        term.lower().startswith("how does dependency injection")
+        for term in follow_up.search_terms
+    )
+    assert terms[-1] in follow_up.search_terms
+
+
+def test_refinement_drops_generic_english_tokens() -> None:
+    kept = _broader_terms(
+        _DI_QUERY,
+        already_tried=[_DI_QUERY],
+        keep_terms=[_DI_QUERY],
+    )
+    lowered = {term.lower() for term in kept}
+    assert any(term.startswith("how does dependency injection") for term in lowered)
+    assert lowered.isdisjoint(_GENERIC_TOKENS)
+
+    added = _broader_terms(
+        "How does FastAPI handle request validation in get_dependant and fastapi.params?",
+        already_tried=["FastAPI"],
+    )
+    added_lower = {term.lower() for term in added}
+    assert added_lower.isdisjoint(_GENERIC_TOKENS)
+    assert "get_dependant" in added_lower
+    assert "fastapi.params" in added_lower
+    assert "handle" not in added_lower
+    assert "validation" not in added_lower
+
+
+@pytest.mark.asyncio
+async def test_refinement_iteration_retries_failed_tools_and_caps_candidates() -> None:
+    graph_query = _GraphQueryClient(
+        index_version="idx-1",
+        find_entity_payload={
+            "matches": [
+                {
+                    "file_path": "fastapi/a.py",
+                    "line_start": 1,
+                    "line_end": 10,
+                    "qualified_name": "fastapi.a.one",
+                    "name": "one",
+                    "tier": "exact",
+                },
+                {
+                    "file_path": "fastapi/b.py",
+                    "line_start": 1,
+                    "line_end": 10,
+                    "qualified_name": "fastapi.b.two",
+                    "name": "two",
+                    "tier": "exact",
+                },
+                {
+                    "file_path": "fastapi/c.py",
+                    "line_start": 1,
+                    "line_end": 10,
+                    "qualified_name": "fastapi.c.three",
+                    "name": "three",
+                    "tier": "exact",
+                },
+            ]
+        },
+    )
+    code_analyst = _CodeAnalystClient()
+    intent = QueryIntent(
+        routing_mode="llm",
+        intent="explanation",
+        entities=["FastAPI"],
+        target_agents=["graph_query", "code_analyst"],
+        reasoning="explain",
+    )
+    plan = ExecutionPlan(
+        routing_mode="llm",
+        intent=intent,
+        agents=["graph_query", "code_analyst"],
+        search_terms=["FastAPI"],
+        iteration=2,
+        retry_tools=["explain_implementation"],
+    )
+    await run_plan(
+        plan,
+        query="explain how FastAPI works",
+        context=None,
+        clients=_clients(graph_query=graph_query, code_analyst=code_analyst),  # type: ignore[arg-type]
+        settings=OrchestratorSettings(),
+        correlation_id="corr-retry-cap",
+    )
+    assert len(code_analyst.explain_calls) == 2
+    assert code_analyst.analyze_calls == []
+    assert code_analyst.analyze_class_calls == []
+    assert code_analyst.snippets_requested == []
 
 

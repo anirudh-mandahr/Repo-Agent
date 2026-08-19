@@ -44,12 +44,14 @@ Source:
 
 FIND_PATTERNS_SYSTEM = (
     "You are a code analyst. Explain the listed structural-pattern instances "
-    "found in the knowledge graph."
+    "found in the knowledge graph. Write one overall summary of how the "
+    "pattern is used. Include per-instance explanations for at most 10 "
+    "representative instances; do not repeat the full instance list."
 )
 
 FIND_PATTERNS_PROMPT = """Explain these instances of the '{pattern}' pattern.
 
-Instances:
+Instances (sample; the full list is preserved separately):
 {instances}
 """
 

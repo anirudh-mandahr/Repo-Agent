@@ -9,6 +9,7 @@ from core.llm.provider import LLMProvider, Message
 from core.logging import get_logger
 from core.memory import ConversationContext
 from core.observability.ledger import TokenLedger
+from core.querying.patterns import SUPPORTED_PATTERNS
 from core.settings import OrchestratorSettings
 
 from .models import (
@@ -34,6 +35,13 @@ _CODEBASE_GROUNDING_RE = re.compile(
 _AGENT_ORDER: tuple[AgentName, ...] = ("indexer", "graph_query", "code_analyst", "memory")
 
 
+# CamelCase, dotted paths, and snake_case. The snake_case branch requires at
+# least one underscore so ordinary prose words cannot be read as identifiers.
+_IDENTIFIER_RE = (
+    r"\b(?:[A-Z][A-Za-z0-9_]+|[a-z_][a-z0-9_]*\.[a-z0-9_\.]+|[a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b"
+)
+
+
 def _rule_based_entities(query: str) -> list[str]:
     """Extract a few likely codebase entities for fallback routing.
 
@@ -48,9 +56,11 @@ def _rule_based_entities(query: str) -> list[str]:
         if token:
             candidates.append(token)
 
-    for token in re.findall(r"\b(?:[A-Z][A-Za-z0-9_]+|[a-z_][a-z0-9_]*\.[a-z0-9_\.]+)\b", query):
-        if token.lower() not in {"what", "how"}:
-            candidates.append(token)
+    for token in re.findall(_IDENTIFIER_RE, query):
+        lowered = token.lower()
+        if lowered in _LOOKUP_FILLER and lowered not in _IDENTIFIER_FILLER_EXCEPTIONS:
+            continue
+        candidates.append(token)
 
     return _dedupe(candidates)
 
@@ -105,6 +115,44 @@ _LOOKUP_FILLER = frozenset(
         "why",
     }
 )
+
+# Relationship/type nouns in _LOOKUP_FILLER collide with PascalCase symbols
+# (Depends, Class, Module). Still drop command/question words such as Find.
+_IDENTIFIER_FILLER_EXCEPTIONS = frozenset(
+    {
+        "class",
+        "classes",
+        "depend",
+        "dependent",
+        "dependents",
+        "depends",
+        "file",
+        "files",
+        "function",
+        "functions",
+        "inherit",
+        "inherits",
+        "method",
+        "methods",
+        "module",
+        "modules",
+    }
+)
+
+
+def _pattern_intent_regex() -> re.Pattern[str]:
+    """Match ``pattern(s)`` plus the :data:`SUPPORTED_PATTERNS` surface vocabulary."""
+    alts: list[str] = [r"patterns?"]
+    for name in SUPPORTED_PATTERNS:
+        if name.endswith("y"):
+            stem = name[:-1].replace("_", r"\s+")
+            alts.append(rf"{stem}(?:y|ies)")
+        else:
+            alts.append(rf"{name.replace('_', r'\s+')}s?")
+    return re.compile(r"\b(?:" + "|".join(alts) + r")\b")
+
+
+_PATTERN_INTENT_RE = _pattern_intent_regex()
 
 
 def retrieval_search_terms(query: str, entities: list[str] | None = None) -> list[str]:
@@ -322,7 +370,7 @@ def rule_based_route(
     )
     wants_comparison = "compare" in lowered
     wants_indexing = bool(re.search(r"\bindex\b|\breindex\b", lowered))
-    wants_pattern = bool(re.search(r"\bpatterns?\b", lowered))
+    wants_pattern = bool(_PATTERN_INTENT_RE.search(lowered))
     wants_lookup = bool(
         re.search(r"^(what is|where is|find|show|list)\b", lowered)
         or "what classes" in lowered
@@ -364,6 +412,12 @@ def rule_based_route(
     if not matched_rules and _has_referring_expression(query):
         matched_rules.append("lookup")
         categories.add("lookup")
+
+    # "what design patterns ... and why" matches both pattern and explain.
+    # Keep pattern intent so the query reaches code_analyst.find_patterns.
+    if "pattern" in categories and "explain" in categories:
+        categories.discard("explain")
+        matched_rules = [rule for rule in matched_rules if rule != "explain"]
 
     compatible_categories = categories - {"lookup"}
     if not matched_rules or len(compatible_categories) > 1:

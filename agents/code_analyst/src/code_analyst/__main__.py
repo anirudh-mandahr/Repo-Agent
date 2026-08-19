@@ -94,13 +94,18 @@ async def analyze_class(
 
 
 @mcp.tool()
-async def find_patterns(pattern: str, ctx: ToolContext | None = None) -> PatternAnalysis:
+async def find_patterns(
+    pattern: str,
+    path_prefix: str | None = None,
+    ctx: ToolContext | None = None,
+) -> PatternAnalysis:
     """Find decorator, dependency_injection, or factory instances and explain them."""
     bind_mcp_context(ctx)
-    result = await _service.find_patterns(pattern)
+    result = await _service.find_patterns(pattern, path_prefix=path_prefix)
     log.info(
         "analysis.find_patterns",
         pattern=pattern,
+        path_prefix=path_prefix,
         instance_count=len(result.instances),
         error=result.error,
     )

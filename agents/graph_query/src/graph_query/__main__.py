@@ -13,6 +13,7 @@ from core.mcp.context import bind_mcp_context
 from core.mcp.server import run_agent_mcp
 from core.querying.embeddings import default_embedding_provider
 from core.querying.service import (
+    DocstringResult,
     EntityQueryResult,
     GraphQueryService,
     GraphStatistics,
@@ -68,7 +69,7 @@ async def find_entity(
     ctx: ToolContext | None = None,
 ) -> EntityQueryResult:
     """Find Module/Class/Function/Method by exact name, full-text, or lexical hash."""
-    bind_mcp_context(ctx)
+    correlation_id = bind_mcp_context(ctx)
     result = await asyncio.to_thread(_service.find_entity, name, entity_type)
     log.info(
         "query.find_entity",
@@ -77,6 +78,24 @@ async def find_entity(
         result_count=result.result_count,
         truncated=result.truncated,
         error=result.error,
+        correlation_id=correlation_id,
+    )
+    return result
+
+
+@mcp.tool()
+async def get_docstring(
+    qualified_name: str,
+    ctx: ToolContext | None = None,
+) -> DocstringResult:
+    """Return the indexed docstring for a qualified name or short entity name."""
+    bind_mcp_context(ctx)
+    result = await asyncio.to_thread(_service.get_docstring, qualified_name)
+    log.info(
+        "query.get_docstring",
+        qualified_name=qualified_name,
+        result_count=result.result_count,
+        truncated=result.truncated,
     )
     return result
 

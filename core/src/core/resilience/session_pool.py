@@ -84,7 +84,8 @@ class _AgentSessionBucket:
         self._closed = False
         self._cond = asyncio.Condition()
 
-    async def acquire(self, *, correlation_id: str) -> ToolSession:
+    async def acquire(self, *, correlation_id: str) -> tuple[ToolSession, bool]:
+        """Return ``(session, reused)``; ``reused`` is True for idle-queue hits."""
         created = False
         async with self._cond:
             while True:
@@ -95,7 +96,7 @@ class _AgentSessionBucket:
                         message=f"mcp pool closed; cannot acquire session for {self._agent}",
                     )
                 if self._idle:
-                    return self._idle.pop()
+                    return self._idle.pop(), True
                 if self._size < self._max_size:
                     self._size += 1
                     created = True
@@ -127,7 +128,7 @@ class _AgentSessionBucket:
                         message=f"mcp pool closed; cannot acquire session for {self._agent}",
                     )
                 self._live.append(session)
-            return session
+            return session, False
         raise AgentUnavailableError(
             agent=self._agent,
             correlation_id=correlation_id,
@@ -154,6 +155,19 @@ class _AgentSessionBucket:
             self._size = max(0, self._size - 1)
             self._cond.notify()
         await self._close_quietly(session)
+
+    async def purge_idle(self) -> None:
+        """Drop every idle session; used when a reused session proves stale."""
+        async with self._cond:
+            stale = list(self._idle)
+            self._idle.clear()
+            for session in stale:
+                if session in self._live:
+                    self._live.remove(session)
+            self._size = max(0, self._size - len(stale))
+            self._cond.notify_all()
+        for session in stale:
+            await self._close_quietly(session)
 
     async def aclose(self) -> None:
         async with self._cond:
@@ -332,31 +346,70 @@ class AgentSessionPool:
         progress_callback: ProgressCallback | None = None,
     ) -> Any:
         bucket = self._bucket(agent)
-        session = await bucket.acquire(correlation_id=correlation_id)
+        session, reused = await bucket.acquire(correlation_id=correlation_id)
         self._call_counts[agent] = self._call_counts.get(agent, 0) + 1
         try:
-            from core.observability.tracing import inject_trace_carrier
-
-            meta = inject_trace_carrier(correlation_id)
-            arguments_dict = dict(arguments or {})
-            if progress_callback is not None:
-                result = await session.call_tool(
+            result = await self._invoke_session(
+                session,
+                tool,
+                arguments,
+                correlation_id,
+                progress_callback=progress_callback,
+            )
+        except Exception as exc:
+            await bucket.drop(session)
+            if not reused:
+                raise
+            # Idle sessions opened in an earlier request task can be broken by
+            # anyio cancel-scope task affinity. Purge the idle queue and retry
+            # once on a freshly opened session.
+            log.warning(
+                "mcp.pool.stale_session_retry",
+                agent=agent,
+                tool=tool,
+                error=str(exc),
+            )
+            await bucket.purge_idle()
+            session, _ = await bucket.acquire(correlation_id=correlation_id)
+            try:
+                result = await self._invoke_session(
+                    session,
                     tool,
-                    arguments=arguments_dict,
-                    meta=meta,
+                    arguments,
+                    correlation_id,
                     progress_callback=progress_callback,
                 )
-            else:
-                result = await session.call_tool(
-                    tool,
-                    arguments=arguments_dict,
-                    meta=meta,
-                )
-        except Exception:
-            await bucket.drop(session)
-            raise
+            except Exception:
+                await bucket.drop(session)
+                raise
         await bucket.release(session)
         return result
+
+    async def _invoke_session(
+        self,
+        session: ToolSession,
+        tool: str,
+        arguments: Mapping[str, Any] | None,
+        correlation_id: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> Any:
+        from core.observability.tracing import inject_trace_carrier
+
+        meta = inject_trace_carrier(correlation_id)
+        arguments_dict = dict(arguments or {})
+        if progress_callback is not None:
+            return await session.call_tool(
+                tool,
+                arguments=arguments_dict,
+                meta=meta,
+                progress_callback=progress_callback,
+            )
+        return await session.call_tool(
+            tool,
+            arguments=arguments_dict,
+            meta=meta,
+        )
 
     async def _open_and_count(self, agent: str) -> ToolSession:
         session = await self._open(agent)

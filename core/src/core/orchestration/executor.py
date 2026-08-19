@@ -11,8 +11,8 @@ from core.exceptions import AgentUnavailableError
 from core.graph.schema import REL_CALLS, REL_DEPENDS_ON, REL_IMPORTS, REL_INHERITS_FROM
 from core.logging import get_logger
 from core.memory import ConversationContext
-from core.observability.ledger import TokenLedger
-from core.querying.patterns import SUPPORTED_PATTERNS
+from core.observability.ledger import TokenLedger, record_payload_usage
+from core.querying.patterns import SUPPORTED_PATTERNS, pattern_path_prefix
 from core.querying.service import retrieval_sort_key
 from core.querying.templates import DEFAULT_TRACE_DEPTH
 from core.settings import OrchestratorSettings
@@ -25,6 +25,7 @@ from .scope import is_out_of_scope
 log = get_logger(__name__)
 
 DEFAULT_ANALYSIS_CANDIDATES = 3
+_REFINEMENT_CANDIDATE_CAP = 2
 
 
 class _BudgetSkip(Exception):
@@ -231,11 +232,16 @@ class CodeAnalystClient(Protocol):
         """
         ...
 
-    async def find_patterns(self, pattern: str) -> Any:
+    async def find_patterns(
+        self,
+        pattern: str,
+        path_prefix: str | None = None,
+    ) -> Any:
         """Find instances of a named structural pattern.
 
         Args:
             pattern: One of the supported pattern names.
+            path_prefix: Optional module or file-path prefix for decorator scoping.
 
         Returns:
             Pattern payload.
@@ -303,10 +309,14 @@ def code_analyst_can_start_now(intent: QueryIntent, query: str = "") -> bool:
 
 def _jsonish(value: Any) -> Any:
     if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json")
-    if isinstance(value, Mapping):
-        return dict(value)
-    return value
+        dumped = value.model_dump(mode="json")
+    elif isinstance(value, Mapping):
+        dumped = dict(value)
+    else:
+        return value
+    if isinstance(dumped, dict):
+        dumped.pop("usage", None)
+    return dumped
 
 
 def _entity_hits(result: Any) -> list[dict[str, Any]]:
@@ -340,6 +350,13 @@ def _hit_identity(hit: Mapping[str, Any]) -> str:
         or hit.get("path")
         or ""
     )
+
+
+def _candidate_limit(iteration: int) -> int:
+    """Tighten analysis fan-out after the first retrieval round."""
+    if iteration > 1:
+        return min(_REFINEMENT_CANDIDATE_CAP, DEFAULT_ANALYSIS_CANDIDATES)
+    return DEFAULT_ANALYSIS_CANDIDATES
 
 
 def _select_analysis_candidates(
@@ -535,7 +552,9 @@ async def run_plan(
         timeout = min(timeout_s, remaining) if budget is not None else timeout_s
         if timeout <= 0:
             raise _BudgetSkip()
-        return await asyncio.wait_for(factory(), timeout=timeout)
+        result = await asyncio.wait_for(factory(), timeout=timeout)
+        record_payload_usage(token_ledger, correlation_id, result)
+        return result
 
     async def _run_graph(intent: QueryIntent) -> None:
         nonlocal graph_entities, graph_available, graph_hits, graph_extra, analysis_candidates
@@ -561,6 +580,7 @@ async def run_plan(
                 if plan.search_terms
                 else retrieval_search_terms(query, entities)
             )
+            candidate_limit = _candidate_limit(plan.iteration)
             if "find_entity" in tools.get("first", ()) and not search_terms:
                 agent_status["graph_query"] = AgentOutput(
                     agent="graph_query",
@@ -595,10 +615,20 @@ async def run_plan(
                 for result in find_results:
                     hits = _entity_hits(result)
                     candidates.extend(hits)
-                    per_term.extend(_select_analysis_candidates(hits))
+                    per_term.extend(
+                        _select_analysis_candidates(hits, limit=candidate_limit)
+                    )
                 analysis_candidates = _select_analysis_candidates(
-                    per_term, prefer_exact=False
+                    per_term, prefer_exact=False, limit=candidate_limit
                 )
+                if plan.iteration > 1:
+                    log.info(
+                        "orchestrator.refinement_candidate_cap",
+                        limit=candidate_limit,
+                        selected=len(analysis_candidates),
+                        iteration=plan.iteration,
+                        correlation_id=correlation_id,
+                    )
 
             if is_out_of_scope(query):
                 analysis_candidates = []
@@ -781,7 +811,28 @@ async def run_plan(
                 ]
             tools = _tool_plan(intent.intent, "code_analyst", query)
             parallel = tools.get("parallel", ())
+            if plan.iteration > 1 and plan.retry_tools is not None:
+                retry = set(plan.retry_tools)
+                parallel = tuple(tool for tool in parallel if tool in retry)
+                log.info(
+                    "orchestrator.refinement_analyst_tools",
+                    tools=list(parallel),
+                    iteration=plan.iteration,
+                    candidate_limit=_candidate_limit(plan.iteration),
+                    correlation_id=correlation_id,
+                )
+            if plan.iteration > 1:
+                cap = _candidate_limit(plan.iteration)
+                if len(candidate_hits) > cap:
+                    candidate_hits = candidate_hits[:cap]
             if not parallel:
+                if plan.iteration > 1:
+                    agent_status["code_analyst"] = AgentOutput(
+                        agent="code_analyst",
+                        ok=True,
+                        output={},
+                    )
+                    return
                 log.info(
                     "orchestrator.empty_tool_plan",
                     agent="code_analyst",
@@ -800,10 +851,15 @@ async def run_plan(
 
             if "find_patterns" in parallel:
                 pattern = _pattern_name(query, entities)
+                path_prefix = pattern_path_prefix(query)
                 result = await _call(
                     "code_analyst",
                     "find_patterns",
-                    _bind(clients.code_analyst.find_patterns, pattern),
+                    _bind(
+                        clients.code_analyst.find_patterns,
+                        pattern,
+                        path_prefix=path_prefix,
+                    ),
                     settings.code_analyst_timeout_s,
                 )
                 output["patterns"] = _jsonish(result)

@@ -17,6 +17,7 @@ from core.querying.templates import (
     FIND_RELATED,
     GET_DEPENDENCIES,
     GET_DEPENDENTS,
+    GET_DOCSTRING,
     TRACE_IMPORTS,
     VECTOR_SEARCH,
 )
@@ -61,16 +62,29 @@ def test_patterns_module_has_no_fstrings() -> None:
 def test_templates_use_parameter_placeholders() -> None:
     assert "$name" in FIND_ENTITY
     assert "$entity_type" in FIND_ENTITY
+    assert "DOCUMENTED_BY" in FIND_ENTITY
+    assert "d.text AS docstring_text" in FIND_ENTITY
+    assert "d.summary AS docstring_summary" in FIND_ENTITY
+    assert "$qualified_name" in GET_DOCSTRING
+    assert "DOCUMENTED_BY" in GET_DOCSTRING
+    assert "d.text AS text" in GET_DOCSTRING
+    assert "d.summary AS summary" in GET_DOCSTRING
     assert "$name" in FIND_IMPORTED_NAME
     assert "$name IN i.names" in FIND_IMPORTED_NAME
     assert "i.alias = $name" in FIND_IMPORTED_NAME
+    assert "target.qualified_name" in FIND_IMPORTED_NAME
+    assert "m.qualified_name + '.' + $name" not in FIND_IMPORTED_NAME
     assert "$index_name" in FIND_FULLTEXT
     assert "$lucene_query" in FIND_FULLTEXT
     assert "$top_k" in FIND_FULLTEXT
     assert "source_rank" in FIND_FULLTEXT
+    assert "d.text AS docstring_text" in FIND_FULLTEXT
+    assert "d.summary AS docstring_summary" in FIND_FULLTEXT
     assert "$query_vector" in VECTOR_SEARCH
     assert "$min_score" in VECTOR_SEARCH
     assert "$index_name" in VECTOR_SEARCH
+    assert "d.text AS docstring_text" in VECTOR_SEARCH
+    assert "d.summary AS docstring_summary" in VECTOR_SEARCH
     assert "$name" in GET_DEPENDENCIES
     assert "$name" in GET_DEPENDENTS
     assert "$branch_limit" in GET_DEPENDENCIES
@@ -115,6 +129,16 @@ def test_find_entity_passes_entity_type_as_parameter() -> None:
     assert "FastAPI" not in client.queries[0][0]
     assert client.queries[0][1] == {"name": "FastAPI", "entity_type": "Class"}
     assert any(params.get("entity_type") == "Class" for _query, params in client.queries[1:])
+
+
+def test_get_docstring_passes_qualified_name_as_parameter() -> None:
+    client = CapturingClient()
+    GraphQueryService(client).get_docstring("fastapi.param_functions.Depends")
+    assert "fastapi.param_functions.Depends" not in client.query
+    assert client.params == {"qualified_name": "fastapi.param_functions.Depends"}
+    assert "$qualified_name" in client.query
+    assert "DOCUMENTED_BY" in client.query
+    assert "d.text AS text" in client.query
 
 
 def test_get_dependencies_passes_name_as_parameter() -> None:

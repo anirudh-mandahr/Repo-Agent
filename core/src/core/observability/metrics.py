@@ -27,6 +27,16 @@ SYNTHESIS_LATENCY = Histogram(
     "Synthesis LLM call latency in seconds.",
     buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0),
 )
+SYNTHESIS_TIMEOUT = Histogram(
+    "repochat_synthesis_timeout_seconds",
+    "Derived synthesis LLM timeout in seconds.",
+    buckets=(0.5, 1.0, 2.0, 5.0, 10.0, 18.0, 20.0, 30.0, 45.0, 60.0, 90.0),
+)
+PLAN_DURATION = Histogram(
+    "repochat_plan_duration_seconds",
+    "Plan-phase wall time in seconds before synthesis.",
+    buckets=(0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 35.0, 45.0, 60.0, 90.0),
+)
 TTFT = Histogram(
     "repochat_time_to_first_token_seconds",
     "Time from synthesis start to first streamed token.",
@@ -158,6 +168,22 @@ def record_synthesis_latency(duration_s: float) -> None:
         duration_s: Seconds spent in the synthesis LLM call (or fallback).
     """
     SYNTHESIS_LATENCY.observe(max(0.0, duration_s))
+
+
+def record_synthesis_window(
+    *,
+    synthesis_timeout_s: float,
+    plan_duration_s: float | None = None,
+) -> None:
+    """Record the derived synthesis timeout and plan-phase duration.
+
+    Args:
+        synthesis_timeout_s: Seconds the synthesizer will wait for the LLM.
+        plan_duration_s: Seconds spent in the refinement loop, when known.
+    """
+    SYNTHESIS_TIMEOUT.observe(max(0.0, synthesis_timeout_s))
+    if plan_duration_s is not None:
+        PLAN_DURATION.observe(max(0.0, plan_duration_s))
 
 
 def record_ttft(duration_s: float) -> None:

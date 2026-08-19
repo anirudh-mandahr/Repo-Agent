@@ -8,6 +8,7 @@ from typing import Any
 
 from core.logging import get_logger
 
+from .executor import _tool_plan
 from .models import (
     AgentName,
     AgentOutput,
@@ -19,7 +20,104 @@ from .scope import is_out_of_scope
 
 log = get_logger(__name__)
 
-_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+_GRAPH_TOOLS = frozenset(
+    {"find_entity", "get_dependencies", "get_dependents", "trace_imports", "find_related"}
+)
+_ANALYST_TOOL_BUCKETS: dict[str, str] = {
+    "explain_implementation": "explanations",
+    "analyze_function": "function_analyses",
+    "analyze_class": "class_analyses",
+    "get_code_snippet": "snippets",
+    "compare_implementations": "comparison",
+    "find_patterns": "patterns",
+}
+_REFINEMENT_STOPWORDS = frozenset(
+    {
+        "about",
+        "across",
+        "all",
+        "also",
+        "any",
+        "been",
+        "being",
+        "both",
+        "but",
+        "can",
+        "code",
+        "codebase",
+        "could",
+        "did",
+        "do",
+        "done",
+        "each",
+        "example",
+        "examples",
+        "few",
+        "get",
+        "give",
+        "got",
+        "had",
+        "handle",
+        "handles",
+        "handling",
+        "has",
+        "have",
+        "implementation",
+        "implemented",
+        "in",
+        "injection",
+        "into",
+        "it",
+        "just",
+        "like",
+        "made",
+        "make",
+        "me",
+        "more",
+        "most",
+        "need",
+        "not",
+        "off",
+        "only",
+        "or",
+        "other",
+        "out",
+        "over",
+        "request",
+        "same",
+        "should",
+        "snippet",
+        "some",
+        "source",
+        "such",
+        "tell",
+        "than",
+        "that",
+        "their",
+        "them",
+        "these",
+        "those",
+        "to",
+        "under",
+        "use",
+        "used",
+        "using",
+        "validation",
+        "via",
+        "want",
+        "was",
+        "we",
+        "were",
+        "with",
+        "work",
+        "working",
+        "works",
+        "would",
+        "you",
+        "your",
+    }
+)
 
 
 def evaluate_evidence(
@@ -46,6 +144,8 @@ def evaluate_evidence(
     graph_failed = _agent_failed(outputs.get("graph_query"))
     analyst_failed = _agent_failed(outputs.get("code_analyst"))
     tried = _tried_terms(plan, outputs)
+    keep_terms = _successful_search_terms(plan, outputs)
+    failed_analyst = _failed_analyst_tools(query, plan, outputs)
 
     if intent.intent == "indexing":
         indexer = outputs.get("indexer")
@@ -64,7 +164,8 @@ def evaluate_evidence(
             sufficient=False,
             reason="pattern_empty",
             suggested_agents=["code_analyst"] if "code_analyst" not in planned else [],
-            broader_terms=_broader_terms(query, tried),
+            broader_terms=_broader_terms(query, tried, keep_terms=keep_terms),
+            suggested_tools=failed_analyst,
         )
 
     needs_graph = intent.intent in {
@@ -90,14 +191,15 @@ def evaluate_evidence(
                 sufficient=False,
                 reason="analyst_failed",
                 suggested_agents=["code_analyst"],
-                broader_terms=_broader_terms(query, tried),
+                broader_terms=_broader_terms(query, tried, keep_terms=keep_terms),
+                suggested_tools=failed_analyst,
             )
         return EvidenceAssessment(sufficient=True, reason="graph_hits")
 
     if analyst_evidence:
         return EvidenceAssessment(sufficient=True, reason="analyst_evidence")
 
-    broader = _broader_terms(query, tried)
+    broader = _broader_terms(query, tried, keep_terms=keep_terms)
     suggested: list[AgentName] = []
     if "code_analyst" not in planned:
         suggested.append("code_analyst")
@@ -110,12 +212,17 @@ def evaluate_evidence(
     elif needs_analyst and not analyst_evidence:
         reason = "insufficient_evidence"
 
+    suggested_tools: list[str] = []
+    if needs_graph:
+        suggested_tools.append("find_entity")
+    suggested_tools.extend(tool for tool in failed_analyst if tool not in suggested_tools)
+
     return EvidenceAssessment(
         sufficient=False,
         reason=reason,
         broader_terms=broader,
         suggested_agents=suggested,
-        suggested_tools=["find_entity"] if needs_graph else [],
+        suggested_tools=suggested_tools,
     )
 
 
@@ -150,9 +257,15 @@ def refine_plan(
         if term not in new_entities:
             new_entities.append(term)
 
+    retry_tools: list[str] | None = None
+    if "code_analyst" in plan.agents:
+        retry_tools = [
+            tool for tool in assessment.suggested_tools if tool not in _GRAPH_TOOLS
+        ]
+
     changed_agents = new_agents != list(intent.target_agents)
     changed_terms = bool(new_terms)
-    if not changed_agents and not changed_terms:
+    if not changed_agents and not changed_terms and not retry_tools:
         return None
 
     new_kind = intent.intent
@@ -176,6 +289,7 @@ def refine_plan(
         reason=assessment.reason,
         agents=new_agents,
         search_terms=search_terms or new_entities,
+        retry_tools=retry_tools,
         iteration=plan.iteration + 1,
     )
     return follow_up.model_copy(
@@ -183,6 +297,7 @@ def refine_plan(
             "search_terms": search_terms,
             "iteration": plan.iteration + 1,
             "refinement_reason": assessment.reason,
+            "retry_tools": retry_tools,
         }
     )
 
@@ -347,23 +462,169 @@ def _tried_terms(plan: ExecutionPlan, outputs: Mapping[AgentName, AgentOutput]) 
     return tried
 
 
-def _broader_terms(query: str, already_tried: Sequence[str]) -> list[str]:
-    tried = {item.strip().lower() for item in already_tried if str(item).strip()}
-    candidates = retrieval_search_terms(query, None)
-    for token in _TOKEN_RE.findall(query):
-        if len(token) <= 2 or token.lower() in _LOOKUP_FILLER:
+def _term_produced_hits(value: Any) -> bool:
+    payload = _as_mapping(value)
+    if payload is None:
+        return False
+    matches = payload.get("matches")
+    if isinstance(matches, list):
+        return any(_is_entity_hit(match) for match in matches)
+    return _is_entity_hit(payload)
+
+
+def _successful_search_terms(
+    plan: ExecutionPlan,
+    outputs: Mapping[AgentName, AgentOutput],
+) -> list[str]:
+    """Prior search terms that produced graph hits and should be carried forward."""
+    if not _has_graph_hits(outputs):
+        return []
+    graph = outputs.get("graph_query")
+    payload = _as_mapping(graph)
+    queried: list[str] = []
+    entities: list[Any] = []
+    if payload is not None:
+        inner = payload.get("output")
+        if isinstance(inner, Mapping):
+            raw_queried = inner.get("queried_entities")
+            if isinstance(raw_queried, list):
+                queried = [str(item) for item in raw_queried if str(item).strip()]
+            raw_entities = inner.get("entities")
+            if isinstance(raw_entities, list):
+                entities = list(raw_entities)
+    if queried and entities and len(queried) == len(entities):
+        kept = [
+            term
+            for term, result in zip(queried, entities, strict=True)
+            if _term_produced_hits(result)
+        ]
+        if kept:
+            return kept
+    if queried:
+        return queried
+    if plan.search_terms:
+        return [term for term in plan.search_terms if term.strip()]
+    return [term for term in plan.intent.entities if term.strip()]
+
+
+def _invoked_tool_names(output: AgentOutput | None) -> set[str]:
+    if output is None:
+        return set()
+    names: set[str] = set()
+    for item in output.tools_invoked:
+        if "." in item:
+            names.add(item.split(".", 1)[1])
+        elif item:
+            names.add(item)
+    return names
+
+
+def _analyst_tool_succeeded(tool: str, inner: Mapping[str, Any] | None) -> bool:
+    if inner is None:
+        return False
+    bucket = _ANALYST_TOOL_BUCKETS.get(tool)
+    if bucket is None:
+        return False
+    value = inner.get(bucket)
+    if tool == "get_code_snippet":
+        if not isinstance(value, list):
+            return False
+        for item in value:
+            mapped = _as_mapping(item)
+            if mapped is not None and mapped.get("text") and not mapped.get("error"):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(_usable_analysis(item) for item in value)
+    return _usable_analysis(value)
+
+
+def _failed_analyst_tools(
+    query: str,
+    plan: ExecutionPlan,
+    outputs: Mapping[AgentName, AgentOutput],
+) -> list[str]:
+    """Analyst tools that should be retried against refined candidates."""
+    if "code_analyst" not in plan.agents:
+        return []
+    planned = _tool_plan(plan.intent.intent, "code_analyst", query).get("parallel", ())
+    if not planned:
+        return []
+    analyst = outputs.get("code_analyst")
+    inner: Mapping[str, Any] | None = None
+    if analyst is not None:
+        payload = _as_mapping(analyst)
+        if payload is not None:
+            output = payload.get("output")
+            inner = output if isinstance(output, Mapping) else None
+    invoked = _invoked_tool_names(analyst)
+    agent_failed = _agent_failed(analyst)
+    had_candidates = _has_graph_hits(outputs)
+    failed: list[str] = []
+    for tool in planned:
+        if _analyst_tool_succeeded(tool, inner):
             continue
-        candidates.append(token)
-    stripped = query.strip()
-    if stripped:
-        candidates.append(stripped)
+        if tool in invoked or agent_failed or not had_candidates:
+            failed.append(tool)
+    return failed
+
+
+def _looks_like_identifier(token: str) -> bool:
+    stripped = token.strip()
+    if not stripped or any(ch.isspace() for ch in stripped):
+        return False
+    if "." in stripped or "_" in stripped:
+        return True
+    return any(ch.isupper() for ch in stripped) and any(ch.islower() for ch in stripped)
+
+
+def _is_refinement_token(token: str) -> bool:
+    stripped = token.strip()
+    if len(stripped) <= 2:
+        return False
+    lowered = stripped.lower()
+    if lowered in _LOOKUP_FILLER or lowered in _REFINEMENT_STOPWORDS:
+        return False
+    return _looks_like_identifier(stripped)
+
+
+def _broader_terms(
+    query: str,
+    already_tried: Sequence[str],
+    *,
+    keep_terms: Sequence[str] = (),
+) -> list[str]:
+    """Carry successful terms and add identifier-like refinements, not generic English."""
+    tried = {item.strip().lower() for item in already_tried if str(item).strip()}
     broader: list[str] = []
     seen: set[str] = set()
+
+    def _add(item: str) -> None:
+        key = item.strip()
+        lowered = key.lower()
+        if not key or lowered in seen:
+            return
+        seen.add(lowered)
+        broader.append(key)
+
+    for item in keep_terms:
+        _add(str(item))
+
+    candidates = retrieval_search_terms(query, None)
+    for token in _TOKEN_RE.findall(query):
+        if _is_refinement_token(token):
+            candidates.append(token)
     for item in candidates:
         key = item.strip()
         lowered = key.lower()
         if not key or lowered in tried or lowered in seen:
             continue
+        if not _is_refinement_token(key):
+            continue
         seen.add(lowered)
         broader.append(key)
+
+    stripped = query.strip()
+    if stripped and stripped.lower() not in tried and stripped.lower() not in seen:
+        _add(stripped)
     return broader

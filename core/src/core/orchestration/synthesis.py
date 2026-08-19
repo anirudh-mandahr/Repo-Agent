@@ -42,6 +42,9 @@ _INCOMPLETE_NO_EVIDENCE = (
     "I don't have enough indexed FastAPI evidence to answer confidently."
 )
 _FILE_LINE_CITE_RE = re.compile(r"\b[\w./-]+\.py:\d+")
+_DOTTED_PY_PATH_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\.py\b")
+_PATH_KEYS = frozenset({"file_path", "filePath", "path"})
+_EVIDENCE_PATH_MAX_DEPTH = 8
 
 
 def _format_session_context(context: ConversationContext) -> str:
@@ -376,11 +379,67 @@ def _evidence_citations(agent_outputs: Mapping[AgentName, Any]) -> list[str]:
     return citations
 
 
+def _evidence_paths(value: Any, *, depth: int = 0) -> set[str]:
+    """Collect every repo-relative ``.py`` path reachable in agent evidence.
+
+    Args:
+        value: Any agent payload, nested mapping, or sequence.
+        depth: Recursion guard.
+
+    Returns:
+        Set of slash-separated paths such as ``fastapi/param_functions.py``.
+    """
+    if depth > _EVIDENCE_PATH_MAX_DEPTH:
+        return set()
+    paths: set[str] = set()
+    mapping = _as_mapping(value)
+    if mapping is not None:
+        for key, item in mapping.items():
+            if key in _PATH_KEYS and isinstance(item, str):
+                text = item.strip().replace("\\", "/")
+                if text.endswith(".py"):
+                    paths.add(text)
+            else:
+                paths |= _evidence_paths(item, depth=depth + 1)
+        return paths
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            paths |= _evidence_paths(item, depth=depth + 1)
+    return paths
+
+
+def _normalize_dotted_paths(answer: str, known_paths: set[str]) -> str:
+    """Rewrite ``pkg.module.py`` citations to the real ``pkg/module.py`` path.
+
+    Synthesis models sometimes render a coordinate from the qualified name
+    (``fastapi.param_functions.py``) instead of the ``file_path`` the evidence
+    carried. The line numbers are correct, but citation validation resolves the
+    path against evidence and rejects the dotted form. Only rewrite when the
+    slash form is a path the evidence actually contained.
+
+    Args:
+        answer: Synthesized answer text.
+        known_paths: Paths collected from agent evidence.
+
+    Returns:
+        The answer with resolvable dotted coordinates rewritten.
+    """
+    if not known_paths:
+        return answer
+
+    def _swap(match: re.Match[str]) -> str:
+        candidate = match.group(1).replace(".", "/") + ".py"
+        return candidate if candidate in known_paths else match.group(0)
+
+    return _DOTTED_PY_PATH_RE.sub(_swap, answer)
+
+
 def _with_grounded_sources(
     query: str,
     answer: str,
     agent_outputs: Mapping[AgentName, Any],
 ) -> str:
+    answer = _normalize_dotted_paths(answer, _evidence_paths(agent_outputs))
     if not wants_codebase_grounding(query):
         return answer
     citations = _evidence_citations(agent_outputs)
@@ -464,6 +523,7 @@ async def synthesize_response(
     from core.llm.provider import Message
     from core.observability.metrics import (
         record_synthesis_latency,
+        record_synthesis_window,
         record_ttft,
     )
 
@@ -478,6 +538,23 @@ async def synthesize_response(
         timeout = timeout_s
     else:
         timeout = settings.synthesis_timeout_s
+    plan_duration_s = budget.plan_duration_s if budget is not None else None
+    remaining_s = budget.remaining_s() if budget is not None else None
+    reserve_s = budget.synthesis_reserve_s if budget is not None else None
+    log.info(
+        "orchestrator.synthesis_window",
+        correlation_id=correlation_id or "-",
+        synthesis_timeout_s=round(timeout, 3),
+        plan_duration_s=(
+            None if plan_duration_s is None else round(plan_duration_s, 3)
+        ),
+        remaining_s=None if remaining_s is None else round(remaining_s, 3),
+        synthesis_reserve_s=None if reserve_s is None else round(reserve_s, 3),
+    )
+    record_synthesis_window(
+        synthesis_timeout_s=timeout,
+        plan_duration_s=plan_duration_s,
+    )
     started = time.perf_counter()
     first_token_at: float | None = None
     emitted: list[str] = []

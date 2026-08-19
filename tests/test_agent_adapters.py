@@ -31,6 +31,8 @@ def test_correlation_id_from_mcp_meta_reads_field_and_extra() -> None:
     assert correlation_id_from_mcp_meta(_Meta(None, {"correlation_id": "from-extra"})) == (
         "from-extra"
     )
+    assert correlation_id_from_mcp_meta({"correlation_id": "from-dict"}) == "from-dict"
+    assert correlation_id_from_mcp_meta({"_meta": {"correlation_id": "nested"}}) == "nested"
     assert correlation_id_from_mcp_meta(_Meta("  ")) is None
     bind_mcp_context(_Ctx(_Meta("corr-bind")))
     assert get_correlation_id() == "corr-bind"
@@ -223,6 +225,9 @@ def test_graph_query_tools(monkeypatch: pytest.MonkeyPatch) -> None:
                 result_count=1, truncated=False, error=None, name=name, entity_type=entity_type
             )
 
+        def get_docstring(self, qualified_name: str) -> SimpleNamespace:
+            return SimpleNamespace(result_count=1, truncated=False, qualified_name=qualified_name)
+
         def get_dependencies(self, name: str) -> SimpleNamespace:
             return SimpleNamespace(result_count=0, truncated=False, total_count=0, name=name)
 
@@ -251,6 +256,7 @@ def test_graph_query_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mod, "_service", _Svc())
     ctx = _Ctx(_Meta("corr-gq"))
     assert asyncio.run(mod.find_entity("FastAPI", None, ctx)).result_count == 1  # type: ignore[arg-type]
+    assert asyncio.run(mod.get_docstring("Depends", ctx)).result_count == 1  # type: ignore[arg-type]
     assert asyncio.run(mod.get_dependencies("FastAPI", ctx)).result_count == 0  # type: ignore[arg-type]
     assert asyncio.run(mod.get_dependents("FastAPI", ctx)).result_count == 0  # type: ignore[arg-type]
     assert asyncio.run(mod.trace_imports("fastapi", 2, ctx)).depth == 2  # type: ignore[arg-type]
@@ -312,7 +318,9 @@ def test_code_analyst_tools_and_explain_error(monkeypatch: pytest.MonkeyPatch) -
         async def analyze_class(self, qualified_name: str) -> ClassAnalysis:
             return ClassAnalysis(qualified_name=qualified_name, summary="ok")
 
-        async def find_patterns(self, pattern: str) -> PatternAnalysis:
+        async def find_patterns(
+            self, pattern: str, path_prefix: str | None = None
+        ) -> PatternAnalysis:
             return PatternAnalysis(pattern=pattern, instances=[])
 
         async def get_code_snippet(self, **kwargs: Any) -> SnippetResult:
@@ -330,7 +338,7 @@ def test_code_analyst_tools_and_explain_error(monkeypatch: pytest.MonkeyPatch) -
     ctx = _Ctx(_Meta("corr-ca"))
     assert asyncio.run(mod.analyze_function("fastapi.FastAPI", ctx)).summary == "ok"  # type: ignore[arg-type]
     assert asyncio.run(mod.analyze_class("fastapi.FastAPI", ctx)).summary == "ok"  # type: ignore[arg-type]
-    assert asyncio.run(mod.find_patterns("decorator", ctx)).pattern == "decorator"  # type: ignore[arg-type]
+    assert asyncio.run(mod.find_patterns("decorator", ctx=ctx)).pattern == "decorator"  # type: ignore[arg-type]
     snippet = asyncio.run(mod.get_code_snippet("q", "fastapi/applications.py", 1, 2, ctx))  # type: ignore[arg-type]
     assert snippet.text == "pass"
     explained = asyncio.run(mod.explain_implementation("fastapi.FastAPI", ctx))  # type: ignore[arg-type]

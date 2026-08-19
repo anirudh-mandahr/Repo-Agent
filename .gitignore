@@ -17,3 +17,5 @@ learnings.md
 .DS_Store
 .idea/
 .vscode/
+docs/walkthrough.md
+.docker-vendor/

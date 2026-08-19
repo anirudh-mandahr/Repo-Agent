@@ -115,6 +115,8 @@ def test_analyze_function_prompt_template_exposes_snippet_and_dependents() -> No
     assert "{snippet}" in ANALYZE_FUNCTION_PROMPT
     assert "{dependents}" in ANALYZE_FUNCTION_PROMPT
     assert "{snippet_a}" in COMPARE_IMPLEMENTATIONS_PROMPT
+    schema = FunctionAnalysis.model_json_schema()
+    assert "usage" not in schema.get("properties", {})
 
 
 async def test_analyze_function_prompt_contains_snippet_and_dependents() -> None:
@@ -131,6 +133,9 @@ async def test_analyze_function_prompt_contains_snippet_and_dependents() -> None
     result = await _service(provider).analyze_function("sample_module.helper")
     assert result.error is None
     assert result.summary == "Identity helper."
+    assert result.usage is not None
+    assert result.usage.total_tokens == 120
+    assert result.usage.model == "stub"
     assert len(provider.calls) == 1
     prompt = "\n".join(message.content for message in provider.calls[0].messages)
     assert "def helper" in prompt
@@ -262,9 +267,84 @@ async def test_find_patterns_uses_cypher_template_then_llm() -> None:
     )
     result = await _service(provider, lookup).find_patterns("decorator")
     assert result.instances[0].qualified_name == "sample_module.ping"
+    assert result.instances[0].explanation == "FastAPI route decorator"
     assert lookup.calls[0][0] == PATTERN_TEMPLATES["decorator"]
     prompt = "\n".join(message.content for message in provider.calls[0].messages)
     assert "sample_module.ping" in prompt
+
+
+async def test_find_patterns_falls_back_to_graph_instances_on_llm_failure() -> None:
+    """Truncated/invalid structured output must not discard graph retrieval."""
+    provider = StubProvider()
+    lookup = FakeLookup()
+    lookup.pattern_rows = [
+        {
+            "qualified_name": "sample_module.ping",
+            "file_path": "sample_module.py",
+            "line_start": 36,
+            "line_end": 38,
+        }
+    ]
+    provider.enqueue('{"pattern": "decorator", "instances": [{"qual', '{"still truncated')
+    result = await _service(provider, lookup).find_patterns("decorator")
+    assert result.error is None
+    assert [item.qualified_name for item in result.instances] == ["sample_module.ping"]
+    assert result.supported_patterns == list(SUPPORTED_PATTERNS)
+
+
+async def test_find_patterns_caps_prompt_instances_and_keeps_full_list() -> None:
+    """Prompt shows a bounded sample; the returned instances stay complete."""
+    provider = StubProvider()
+    lookup = FakeLookup()
+    lookup.pattern_rows = [
+        {
+            "qualified_name": f"sample_module.fn_{index}",
+            "file_path": "sample_module.py",
+            "line_start": index,
+            "line_end": index,
+        }
+        for index in range(12)
+    ]
+    provider.enqueue(
+        PatternAnalysis(
+            pattern="decorator",
+            summary="Decorators wrap route handlers.",
+            instances=[
+                PatternInstance(
+                    qualified_name="sample_module.fn_0",
+                    explanation="representative",
+                )
+            ],
+            supported_patterns=list(SUPPORTED_PATTERNS),
+        ).model_dump()
+    )
+    result = await _service(provider, lookup).find_patterns("decorator")
+    assert len(result.instances) == 12
+    assert result.instances[0].explanation == "representative"
+    assert result.instances[1].explanation == ""
+    assert result.summary == "Decorators wrap route handlers."
+    prompt = "\n".join(message.content for message in provider.calls[0].messages)
+    assert "sample_module.fn_0" in prompt
+    assert "sample_module.fn_11" in prompt
+
+
+async def test_find_patterns_skips_llm_when_instance_list_is_large() -> None:
+    """Large graph hits must not wait on a structured LLM that will time out."""
+    provider = StubProvider()
+    lookup = FakeLookup()
+    lookup.pattern_rows = [
+        {
+            "qualified_name": f"sample_module.fn_{index}",
+            "file_path": "sample_module.py",
+            "line_start": index,
+            "line_end": index,
+        }
+        for index in range(200)
+    ]
+    result = await _service(provider, lookup).find_patterns("decorator")
+    assert len(result.instances) == 200
+    assert "200 decorator instances" in result.summary
+    assert provider.calls == []
 
 
 async def test_get_code_snippet_by_qualified_name() -> None:
@@ -313,6 +393,9 @@ def test_lookups_match_name_or_qualified_name() -> None:
     assert "n.name = $name OR n.qualified_name = $name" in FUNCTION_CONTEXT
     assert "n.name = $name OR n.qualified_name = $name" in CLASS_CONTEXT
     assert "n.name = $name OR n.qualified_name = $name" in ENTITY_LOCATION
+    assert "last(split($name, '.'))" in ENTITY_LOCATION
+    assert "last(split($name, '.'))" in CLASS_CONTEXT
+    assert "last(split($name, '.'))" in FUNCTION_CONTEXT
     assert "$qualified_name" not in FUNCTION_CONTEXT
     assert "$qualified_name" not in CLASS_CONTEXT
     assert "$qualified_name" not in ENTITY_LOCATION

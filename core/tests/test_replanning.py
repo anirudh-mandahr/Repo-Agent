@@ -110,7 +110,9 @@ class _CodeAnalystClient:
         self.compare_calls.append((name_a, name_b))
         return {"name_a": name_a, "name_b": name_b, "summary": "compared", "error": None}
 
-    async def find_patterns(self, pattern: str) -> object:
+    async def find_patterns(
+        self, pattern: str, path_prefix: str | None = None
+    ) -> object:
         return {"pattern": pattern, "instances": [], "error": None}
 
 
@@ -352,3 +354,131 @@ async def test_chat_stream_emits_routing_event_per_plan_iteration() -> None:
     assert routing[0].data["sufficient"] is False
     assert routing[1].data["iteration"] == 2
     assert routing[1].data["sufficient"] is True
+
+
+def _analyst_call_count(tools: list[str]) -> int:
+    return sum(1 for tool in tools if tool.startswith("code_analyst."))
+
+
+@pytest.mark.asyncio
+async def test_refinement_round_issues_fewer_analyst_calls() -> None:
+    query = "How does dependency injection work and show me examples from the codebase"
+
+    class _FailingAnalyst(_CodeAnalystClient):
+        async def get_code_snippet(
+            self,
+            *,
+            qualified_name: str | None = None,
+            file_path: str | None = None,
+            line_start: int | None = None,
+            line_end: int | None = None,
+        ) -> object:
+            await super().get_code_snippet(
+                qualified_name=qualified_name,
+                file_path=file_path,
+                line_start=line_start,
+                line_end=line_end,
+            )
+            raise TimeoutError("code_analyst timeout")
+
+        async def explain_implementation(self, qualified_name: str) -> object:
+            self.explain_calls.append(qualified_name)
+            raise TimeoutError("code_analyst timeout")
+
+        async def analyze_function(self, qualified_name: str) -> object:
+            self.analyze_calls.append(qualified_name)
+            raise TimeoutError("code_analyst timeout")
+
+        async def analyze_class(self, qualified_name: str) -> object:
+            self.analyze_calls.append(qualified_name)
+            raise TimeoutError("code_analyst timeout")
+
+    hits = {
+        "matches": [
+            {
+                "file_path": "fastapi/params.py",
+                "line_start": 1,
+                "line_end": 40,
+                "qualified_name": "fastapi.params.Depends",
+                "name": "Depends",
+                "tier": "exact",
+            },
+            {
+                "file_path": "fastapi/dependencies/utils.py",
+                "line_start": 10,
+                "line_end": 80,
+                "qualified_name": "fastapi.dependencies.utils.get_dependant",
+                "name": "get_dependant",
+                "tier": "exact",
+            },
+            {
+                "file_path": "fastapi/dependencies/utils.py",
+                "line_start": 200,
+                "line_end": 260,
+                "qualified_name": "fastapi.dependencies.utils.solve_dependencies",
+                "name": "solve_dependencies",
+                "tier": "exact",
+            },
+        ]
+    }
+
+    class _ConceptualGraph(_GraphQueryClient):
+        async def find_entity(self, name: str, entity_type: str | None = None) -> object:
+            _ = entity_type
+            self.find_entity_calls.append(name)
+            lowered = name.lower()
+            if lowered in {"work", "examples", "codebase", "handle", "validation"}:
+                return {
+                    "matches": [
+                        {
+                            "file_path": "tests/test_dependency_duplicates.py",
+                            "line_start": 1,
+                            "line_end": 20,
+                            "qualified_name": "tests.test_dependency_duplicates",
+                            "name": name,
+                            "tier": "fulltext",
+                        }
+                    ]
+                }
+            if lowered.startswith("how does dependency") or "dependenc" in lowered:
+                return hits
+            return {"matches": [], "result_count": 0}
+
+    llm = StubProvider(
+        [
+            QueryIntent(
+                routing_mode="llm",
+                intent="explanation",
+                entities=[],
+                target_agents=["graph_query", "code_analyst"],
+                reasoning="explain DI",
+            ).model_dump(),
+            "PARTIAL",
+        ]
+    )
+    settings = OrchestratorSettings(routing_strategy="llm_first", max_plan_iterations=2)
+    service = OrchestratorService(llm, settings=settings)
+    graph_query = _ConceptualGraph()
+    code_analyst = _FailingAnalyst()
+    result = await service.handle_query(
+        query,
+        "session-1",
+        clients=_clients(graph_query=graph_query, code_analyst=code_analyst),  # type: ignore[arg-type]
+        correlation_id="corr-refine-fanout",
+    )
+
+    iterations = result.metadata["plan_iterations"]
+    assert len(iterations) == 2
+    round1 = _analyst_call_count(iterations[0]["tools_invoked"])
+    round2 = _analyst_call_count(iterations[1]["tools_invoked"])
+    assert round1 > 0
+    assert round2 < round1
+    assert any(
+        str(term).lower().startswith("how does dependency injection")
+        for term in graph_query.find_entity_calls
+    )
+    generic = {"work", "examples", "codebase", "handle", "validation"}
+    assert generic.isdisjoint({call.lower() for call in graph_query.find_entity_calls})
+    assert not any(
+        "test_dependency_duplicates" in str(call) for call in code_analyst.explain_calls
+    )

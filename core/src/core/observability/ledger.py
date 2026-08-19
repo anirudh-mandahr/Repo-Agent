@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -127,6 +128,30 @@ class TokenLedger:
             model=model,
         )
 
+    def record_payload(
+        self,
+        correlation_id: str,
+        payload: object,
+        *,
+        purpose: LLMPurpose = "analysis",
+    ) -> bool:
+        """Record usage embedded in a specialist MCP payload, if present.
+
+        Args:
+            correlation_id: Request id opened earlier.
+            payload: Tool result mapping or pydantic model that may carry
+                ``usage``.
+            purpose: Ledger bucket. Code analyst spend uses ``analysis``.
+
+        Returns:
+            ``True`` when a usage object was recorded.
+        """
+        usage = usage_from_payload(payload)
+        if usage is None:
+            return False
+        self.record(correlation_id, purpose, usage)
+        return True
+
     def snapshot(self, correlation_id: str) -> dict[str, object]:
         """Return current totals without closing the request entry.
 
@@ -166,6 +191,61 @@ def _entry_totals(entry: _LedgerEntry) -> dict[str, object]:
         "by_purpose": {key: dict(value) for key, value in entry.by_purpose.items()},
         "by_model": {key: dict(value) for key, value in entry.by_model.items()},
     }
+
+
+def usage_from_payload(payload: object) -> TokenUsage | None:
+    """Extract ``TokenUsage`` from a code_analyst MCP payload.
+
+    Args:
+        payload: Tool result mapping, pydantic model, or unrelated value.
+
+    Returns:
+        Usage when the payload includes a usable ``usage`` object; otherwise
+        ``None``.
+    """
+    raw: object | None
+    if isinstance(payload, Mapping):
+        raw = payload.get("usage")
+    else:
+        try:
+            raw = payload.usage  # type: ignore[attr-defined]
+        except AttributeError:
+            return None
+    if raw is None:
+        return None
+    if isinstance(raw, TokenUsage):
+        usage = raw
+    else:
+        try:
+            usage = TokenUsage.model_validate(raw)
+        except (TypeError, ValueError):
+            return None
+    if usage.total_tokens <= 0 and usage.prompt_tokens <= 0:
+        return None
+    return usage
+
+
+def record_payload_usage(
+    ledger: TokenLedger | None,
+    correlation_id: str,
+    payload: object,
+    *,
+    purpose: LLMPurpose = "analysis",
+) -> bool:
+    """Record specialist-payload usage onto ``ledger`` when present.
+
+    Args:
+        ledger: Request token ledger, or ``None`` when accounting is disabled.
+        correlation_id: Request id.
+        payload: Tool result that may embed ``usage``.
+        purpose: Ledger bucket. Code analyst spend uses ``analysis``.
+
+    Returns:
+        ``True`` when usage was recorded.
+    """
+    if ledger is None:
+        return False
+    return ledger.record_payload(correlation_id, payload, purpose=purpose)
 
 
 def _add_to_bucket(

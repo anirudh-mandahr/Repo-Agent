@@ -113,6 +113,8 @@ def test_find_entity_maps_rows() -> None:
     assert hit.entity_type == "Function"
     assert hit.file_path == "fastapi/openapi/utils.py"
     assert hit.line_start == 10
+    assert hit.docstring_text is None
+    assert hit.docstring_summary is None
 
 
 def test_find_entity_invalid_type_returns_structured_error() -> None:
@@ -641,10 +643,138 @@ def test_retrieval_sort_key_ranks_reexport_above_unrelated_and_tests() -> None:
     assert local < unrelated < test_hit
 
 
+def test_find_entity_maps_docstring_fields() -> None:
+    client = FakeClient(
+        [
+            {
+                "labels": ["Function"],
+                "name": "Depends",
+                "qualified_name": "fastapi.param_functions.Depends",
+                "file_path": "fastapi/param_functions.py",
+                "path": None,
+                "line_start": 80,
+                "line_end": 120,
+                "docstring_text": "Declare a FastAPI dependency.\n\nIt takes a single callable.",
+                "docstring_summary": "Declare a FastAPI dependency.",
+            }
+        ]
+    )
+    result = GraphQueryService(client).find_entity("Depends")
+    hit = result.matches[0]
+    assert hit.docstring_summary == "Declare a FastAPI dependency."
+    assert hit.docstring_text is not None
+    assert "single callable" in hit.docstring_text
+    assert "dependency_overrides_provider" not in hit.docstring_text
+
+
+def test_get_docstring_maps_rows() -> None:
+    client = FakeClient(
+        [
+            {
+                "labels": ["Function"],
+                "name": "Depends",
+                "qualified_name": "fastapi.param_functions.Depends",
+                "file_path": "fastapi/param_functions.py",
+                "line_start": 80,
+                "line_end": 120,
+                "text": "Declare a FastAPI dependency.",
+                "summary": "Declare a FastAPI dependency.",
+            }
+        ]
+    )
+    result = GraphQueryService(client).get_docstring("Depends")
+    assert result.qualified_name == "Depends"
+    assert result.result_count == 1
+    assert result.truncated is False
+    hit = result.matches[0]
+    assert hit.qualified_name == "fastapi.param_functions.Depends"
+    assert hit.entity_type == "Function"
+    assert hit.text == "Declare a FastAPI dependency."
+    assert hit.summary == "Declare a FastAPI dependency."
+    query, params, _timeout = client.queries[0]
+    assert "Depends" not in query
+    assert params == {"qualified_name": "Depends"}
+    assert "$qualified_name" in query
+    assert "DOCUMENTED_BY" in query
+
+
+def test_get_docstring_ranks_package_source_first() -> None:
+    client = FakeClient(
+        [
+            {
+                "labels": ["Function"],
+                "name": "Depends",
+                "qualified_name": "tests.test_depends.Depends",
+                "file_path": "tests/test_depends.py",
+                "text": "test double",
+                "summary": "test double",
+            },
+            {
+                "labels": ["Function"],
+                "name": "Depends",
+                "qualified_name": "fastapi.param_functions.Depends",
+                "file_path": "fastapi/param_functions.py",
+                "text": "Declare a FastAPI dependency.",
+                "summary": "Declare a FastAPI dependency.",
+            },
+        ]
+    )
+    result = GraphQueryService(client).get_docstring("Depends")
+    assert result.matches[0].file_path == "fastapi/param_functions.py"
+    assert result.matches[0].text == "Declare a FastAPI dependency."
+
+
 def test_conceptual_entity_names_covers_dependency_resolution() -> None:
     names = conceptual_entity_names("How does dependency resolution work in the codebase")
     assert names == ["Depends", "get_dependant", "solve_dependencies"]
     assert conceptual_entity_names("What is WebSocket?") == []
+
+
+def test_conceptual_entity_names_covers_request_lifecycle_and_validation() -> None:
+    lifecycle = conceptual_entity_names("Explain the complete lifecycle of a FastAPI request")
+    assert lifecycle == [
+        "APIRoute.get_request_handler",
+        "run_endpoint_function",
+        "serialize_response",
+    ]
+    validation = conceptual_entity_names("How does FastAPI handle request validation?")
+    assert validation == [
+        "request_params_to_args",
+        "request_body_to_args",
+        "RequestValidationError",
+    ]
+    assert conceptual_entity_names("What is WebSocket?") == []
+
+
+def test_retrieve_request_lifecycle_looks_up_conceptual_entities() -> None:
+    client = FakeClient(
+        by_query={
+            "n.name = $name OR n.qualified_name = $name": [],
+            "$name IN i.names": [],
+            "db.index.fulltext.queryNodes": [],
+        }
+    )
+    service = GraphQueryService(client)
+    service.retrieve("Explain the complete lifecycle of a FastAPI request")
+    lifecycle_names = [
+        params["name"]
+        for query, params, _timeout in client.queries
+        if "n.name = $name OR n.qualified_name = $name" in query
+    ]
+    assert "APIRoute.get_request_handler" in lifecycle_names
+    assert "run_endpoint_function" in lifecycle_names
+    assert "serialize_response" in lifecycle_names
+
+    client.queries.clear()
+    service.retrieve("How does FastAPI handle request validation?")
+    validation_names = [
+        params["name"]
+        for query, params, _timeout in client.queries
+        if "n.name = $name OR n.qualified_name = $name" in query
+    ]
+    assert "request_params_to_args" in validation_names
+    assert "request_body_to_args" in validation_names
+    assert "RequestValidationError" in validation_names
 
 
 def test_retrieve_reexport_ranks_websocket_module_above_imports_and_tests() -> None:

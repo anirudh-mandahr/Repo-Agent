@@ -111,7 +111,9 @@ class _Code:
         self.calls += 1
         return {"name_a": name_a, "name_b": name_b, "summary": "compared", "error": None}
 
-    async def find_patterns(self, pattern: str) -> object:
+    async def find_patterns(
+        self, pattern: str, path_prefix: str | None = None
+    ) -> object:
         self.calls += 1
         return {"pattern": pattern, "instances": [], "error": None}
 
@@ -888,4 +890,178 @@ async def test_c05_fanout_does_not_starve_synthesis(
     assert result.metadata.get("degraded") is not True
     assert EVIDENCE_ONLY_HEADER not in result.answer
     assert "APIRouter owns the route table" in result.answer
+
+
+_ANALYST_USAGE = {
+    "prompt_tokens": 200,
+    "completion_tokens": 40,
+    "total_tokens": 240,
+    "model": "stub-analysis",
+    "cached_prompt_tokens": 0,
+    "estimated": False,
+}
+
+
+class _CodeWithUsage(_Code):
+    async def explain_implementation(self, qualified_name: str) -> object:
+        self.calls += 1
+        return {
+            "qualified_name": qualified_name,
+            "explanation": "explained",
+            "error": None,
+            "usage": dict(_ANALYST_USAGE),
+        }
+
+    async def analyze_function(self, qualified_name: str) -> object:
+        self.calls += 1
+        return {
+            "qualified_name": qualified_name,
+            "summary": "analyzed",
+            "error": None,
+            "usage": dict(_ANALYST_USAGE),
+        }
+
+    async def analyze_class(self, qualified_name: str) -> object:
+        self.calls += 1
+        return {
+            "qualified_name": qualified_name,
+            "summary": "analyzed class",
+            "error": None,
+            "usage": dict(_ANALYST_USAGE),
+        }
+
+
+def test_request_budget_check_includes_analysis_spend() -> None:
+    ledger = TokenLedger()
+    ledger.open("corr-analysis-budget")
+    ledger.record(
+        "corr-analysis-budget",
+        "analysis",
+        TokenUsage(
+            prompt_tokens=200,
+            completion_tokens=40,
+            total_tokens=240,
+            model="stub-analysis",
+        ),
+    )
+    budget = RequestBudget(
+        deadline_monotonic=time.monotonic() + 55,
+        token_ceiling=10_000,
+        cost_usd_max=0.0001,
+        safety_margin_s=2.0,
+        min_synthesis_timeout_s=0.0,
+        max_synthesis_timeout_s=20.0,
+    )
+    assert budget.check(ledger, "corr-analysis-budget") == "cost"
+    snapshot = ledger.snapshot("corr-analysis-budget")
+    assert snapshot["by_purpose"]["analysis"]["total"] == 240
+    assert snapshot["llm_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_code_analyst_usage_is_recorded_on_the_ledger() -> None:
+    graph = _Graph()
+    code = _CodeWithUsage()
+    intent = QueryIntent(
+        intent="explanation",
+        entities=["FastAPI"],
+        target_agents=["graph_query", "code_analyst"],
+        reasoning="explain FastAPI",
+    )
+    service = OrchestratorService(
+        StubProvider([intent.model_dump(), "FINAL ANSWER"]),
+        settings=OrchestratorSettings(
+            routing_strategy="llm_first",
+            request_budgets_enabled=True,
+            request_token_budget=50_000,
+            request_cost_usd_max=1.0,
+            request_deadline_s=55,
+        ),
+    )
+    result = await service.handle_query(
+        "How does FastAPI handle request validation?",
+        "s-analysis-usage",
+        clients=_clients(graph, code),  # type: ignore[arg-type]
+        correlation_id="corr-analysis-usage",
+    )
+    tokens = result.metadata["tokens"]
+    analysis = tokens["by_purpose"]["analysis"]
+    assert analysis["total"] >= 240
+    assert analysis["llm_calls"] >= 1
+    assert tokens["llm_calls"] >= analysis["llm_calls"] + 2
+    assert float(tokens["cost_usd"]) > 0
+    assert "routing" in tokens["by_purpose"]
+    assert "synthesis" in tokens["by_purpose"]
+
+
+@pytest.mark.asyncio
+async def test_synthesis_window_logs_timeout_and_plan_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    class _Log:
+        def info(self, event: str, **kwargs: Any) -> None:
+            events.append((event, kwargs))
+
+        def warning(self, event: str, **kwargs: Any) -> None:
+            events.append((event, kwargs))
+
+    monkeypatch.setattr("core.orchestration.synthesis.log", _Log())
+    intent = QueryIntent(
+        intent="lookup",
+        entities=["FastAPI"],
+        target_agents=["graph_query"],
+        reasoning="lookup",
+    )
+    service = OrchestratorService(
+        StubProvider([intent.model_dump(), "FINAL ANSWER"]),
+        settings=OrchestratorSettings(
+            routing_strategy="llm_first",
+            request_budgets_enabled=True,
+            request_deadline_s=55,
+            plan_deadline_s=35,
+            synthesis_reserve_s=20,
+            synthesis_safety_margin_s=2,
+        ),
+    )
+    result = await service.handle_query(
+        "What is the FastAPI class?",
+        "s-window",
+        clients=_clients(),  # type: ignore[arg-type]
+        correlation_id="corr-synthesis-window",
+    )
+    assert result.answer
+    window = [fields for event, fields in events if event == "orchestrator.synthesis_window"]
+    assert window
+    fields = window[0]
+    assert fields["correlation_id"] == "corr-synthesis-window"
+    assert fields["synthesis_timeout_s"] > 0
+    assert fields["plan_duration_s"] is not None
+    assert fields["plan_duration_s"] >= 0
+    assert fields["remaining_s"] is not None
+    from core.observability.metrics import render_metrics
+
+    text = render_metrics().decode("utf-8")
+    assert "repochat_synthesis_timeout_seconds" in text
+    assert "repochat_plan_duration_seconds" in text
+
+
+def test_diagnostic_long_budget_profile_passes_settings_validators() -> None:
+    from core.llm.pricing import measured_synthesis_p95_s
+    from core.settings import GatewaySettings, LLMSettings
+
+    settings = OrchestratorSettings(
+        request_deadline_s=110.0,
+        plan_deadline_s=45.0,
+        synthesis_reserve_s=60.0,
+        synthesis_safety_margin_s=2.0,
+    )
+    assert settings.plan_deadline_s + settings.synthesis_reserve_s <= settings.request_deadline_s
+    model = LLMSettings().resolve_model("synthesis")
+    p95 = measured_synthesis_p95_s(model)
+    assert p95 is not None
+    assert settings.synthesis_reserve_s - settings.synthesis_safety_margin_s >= p95
+    gateway = GatewaySettings(chat_timeout_s=130.0)
+    assert gateway.chat_timeout_s > settings.request_deadline_s
 

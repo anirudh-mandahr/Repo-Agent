@@ -43,12 +43,13 @@ from core.analysis.snippets import (
 from core.exceptions import SchemaValidationError
 from core.llm.provider import LLMProvider, LLMResult, Message
 from core.logging import get_logger
-from core.querying.patterns import SUPPORTED_PATTERNS, pattern_cypher
+from core.querying.patterns import SUPPORTED_PATTERNS, pattern_cypher, pattern_params
 
 log = get_logger(__name__)
 
 MAX_PROMPT_SNIPPET_LINES = 120
 MAX_PROMPT_LIST_ITEMS = 40
+FIND_PATTERNS_MAX_TOKENS = 2048
 
 
 class GraphLookup(Protocol):
@@ -166,11 +167,16 @@ class CodeAnalystService:
         result = await self._complete(ANALYZE_CLASS_SYSTEM, prompt, ClassAnalysis)
         return _require_parsed(result, ClassAnalysis, agent=self._agent)
 
-    async def find_patterns(self, pattern: str) -> PatternAnalysis:
+    async def find_patterns(
+        self,
+        pattern: str,
+        path_prefix: str | None = None,
+    ) -> PatternAnalysis:
         """Find decorator / dependency_injection / factory instances, then explain them.
         
         Args:
             pattern: str.
+            path_prefix: Optional module or file-path prefix for decorator scoping.
 
         Returns:
             PatternAnalysis.
@@ -188,7 +194,7 @@ class CodeAnalystService:
                 error=error,
                 supported_patterns=supported,
             )
-        rows = await self._graph_lookup(cypher, {})
+        rows = await self._graph_lookup(cypher, pattern_params(pattern, path_prefix))
         instances = [
             PatternInstance(
                 qualified_name=_str(row.get("qualified_name")),
@@ -205,17 +211,63 @@ class CodeAnalystService:
                 instances=[],
                 supported_patterns=list(SUPPORTED_PATTERNS),
             )
+        if len(instances) > MAX_PROMPT_LIST_ITEMS:
+            log.info(
+                "analysis.find_patterns_skip_llm",
+                pattern=pattern,
+                instance_count=len(instances),
+            )
+            return PatternAnalysis(
+                pattern=pattern,
+                summary=(
+                    f"Found {len(instances)} {pattern} instances in the indexed graph. "
+                    "Per-instance explanations were skipped because the result set is large."
+                ),
+                instances=instances,
+                supported_patterns=list(SUPPORTED_PATTERNS),
+            )
         prompt = render_prompt(
             FIND_PATTERNS_PROMPT,
             {
                 "pattern": pattern,
-                "instances": _bullets([item.qualified_name for item in instances]),
+                "instances": _bullets(
+                    _limited([item.qualified_name for item in instances])
+                ),
             },
         )
-        result = await self._complete(FIND_PATTERNS_SYSTEM, prompt, PatternAnalysis)
-        parsed = _require_parsed(result, PatternAnalysis, agent=self._agent)
-        if not parsed.instances:
-            parsed = parsed.model_copy(update={"instances": instances, "pattern": pattern})
+        try:
+            result = await self._complete(
+                FIND_PATTERNS_SYSTEM,
+                prompt,
+                PatternAnalysis,
+                max_tokens=FIND_PATTERNS_MAX_TOKENS,
+            )
+            parsed = _require_parsed(result, PatternAnalysis, agent=self._agent)
+        except SchemaValidationError:
+            # Graph retrieval succeeded; never discard it because the
+            # explanation LLM failed. Return the instances unexplained.
+            log.warning(
+                "analysis.find_patterns_llm_failed",
+                pattern=pattern,
+                instance_count=len(instances),
+            )
+            return PatternAnalysis(
+                pattern=pattern,
+                instances=instances,
+                supported_patterns=list(SUPPORTED_PATTERNS),
+            )
+        # Keep the complete graph-derived instance list; graft LLM
+        # explanations onto it by qualified name.
+        explanations = {
+            item.qualified_name: item.explanation
+            for item in parsed.instances
+            if item.explanation
+        }
+        merged = [
+            item.model_copy(update={"explanation": explanations.get(item.qualified_name, "")})
+            for item in instances
+        ]
+        parsed = parsed.model_copy(update={"instances": merged, "pattern": pattern})
         if not parsed.supported_patterns:
             parsed = parsed.model_copy(update={"supported_patterns": list(SUPPORTED_PATTERNS)})
         return parsed
@@ -484,6 +536,8 @@ class CodeAnalystService:
         system: str,
         prompt: str,
         response_model: type[BaseModel],
+        *,
+        max_tokens: int = 1024,
     ) -> LLMResult:
         messages = [
             Message(role="system", content=system),
@@ -494,6 +548,7 @@ class CodeAnalystService:
             response_model,
             purpose="analysis",
             agent=self._agent,
+            max_tokens=max_tokens,
         )
 
 
@@ -521,16 +576,23 @@ def _require_parsed[TModel: BaseModel](
 ) -> TModel:
     parsed = result.parsed
     if isinstance(parsed, model):
-        return parsed
+        return _with_usage(parsed, result.usage)
     if parsed is not None:
         try:
-            return model.model_validate(parsed.model_dump())
+            validated = model.model_validate(parsed.model_dump())
         except ValidationError as exc:
             raise SchemaValidationError(agent=agent, message=str(exc)) from exc
+        return _with_usage(validated, result.usage)
     raise SchemaValidationError(
         agent=agent,
         message=f"provider returned no {model.__name__} instance",
     )
+
+
+def _with_usage[TModel: BaseModel](parsed: TModel, usage: object) -> TModel:
+    if "usage" not in type(parsed).model_fields:
+        return parsed
+    return parsed.model_copy(update={"usage": usage})
 
 
 def _str(value: Any) -> str:

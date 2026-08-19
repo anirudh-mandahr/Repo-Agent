@@ -301,6 +301,12 @@ def _serialize_messages(
 def _tool_schema(response_model: type[BaseModel]) -> dict[str, Any]:
     schema = response_model.model_json_schema()
     schema.pop("$schema", None)
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        properties.pop("usage", None)
+    required = schema.get("required")
+    if isinstance(required, list):
+        schema["required"] = [item for item in required if item != "usage"]
     if schema.get("type") != "object":
         schema["type"] = "object"
     return schema

@@ -18,7 +18,11 @@ from core.orchestration.prompt_budget import (
     measure_synthesis_prompt,
 )
 from core.orchestration.service import OrchestratorService
-from core.orchestration.synthesis import synthesize_response
+from core.orchestration.synthesis import (
+    _evidence_paths,
+    _normalize_dotted_paths,
+    synthesize_response,
+)
 from core.settings import OrchestratorSettings
 
 _FASTAPI_HIT = {
@@ -153,7 +157,9 @@ class _CodeAnalystClient:
     async def compare_implementations(self, name_a: str, name_b: str) -> object:
         return {"name_a": name_a, "name_b": name_b, "summary": "compared", "error": None}
 
-    async def find_patterns(self, pattern: str) -> object:
+    async def find_patterns(
+        self, pattern: str, path_prefix: str | None = None
+    ) -> object:
         return {"pattern": pattern, "instances": [], "error": None}
 
 
@@ -366,6 +372,9 @@ async def test_synthesis_failed_logs_structured_event(monkeypatch: pytest.Monkey
     events: list[tuple[str, dict[str, Any]]] = []
 
     class _Log:
+        def info(self, event: str, **kwargs: Any) -> None:
+            events.append((event, kwargs))
+
         def warning(self, event: str, **kwargs: Any) -> None:
             events.append((event, kwargs))
 
@@ -384,9 +393,9 @@ async def test_synthesis_failed_logs_structured_event(monkeypatch: pytest.Monkey
         correlation_id="corr-log",
     )
 
-    assert events
-    event, fields = events[0]
-    assert event == "orchestrator.synthesis_failed"
+    failed = [fields for event, fields in events if event == "orchestrator.synthesis_failed"]
+    assert failed
+    fields = failed[0]
     assert fields["correlation_id"] == "corr-log"
     assert fields["exception_type"] == "ValueError"
     assert fields["prompt_chars"] > 0
@@ -468,3 +477,39 @@ def test_compacted_neighbor_payload_stays_under_turn_token_ceiling() -> None:
     assert len(summarized["neighbors"]) <= 8
     assert "12000 neighbors" in summarized["summary"]
     assert estimate_tokens(summarized["summary"]) < 50
+
+
+def test_evidence_paths_collects_nested_file_paths() -> None:
+    payload = {
+        "graph_query": {
+            "output": {
+                "entities": [
+                    {
+                        "qualified_name": "fastapi.param_functions.Depends",
+                        "file_path": "fastapi/param_functions.py",
+                    }
+                ]
+            }
+        }
+    }
+    assert _evidence_paths(payload) == {"fastapi/param_functions.py"}
+
+
+def test_normalize_dotted_paths_rewrites_only_known_paths() -> None:
+    known = {"fastapi/param_functions.py", "fastapi/params.py"}
+    answer = (
+        "See `fastapi.param_functions.py` (lines 2283-2369) and fastapi.params.py:745, "
+        "but leave some.other.py and fastapi/routing.py:10 alone."
+    )
+    normalized = _normalize_dotted_paths(answer, known)
+
+    assert "fastapi/param_functions.py" in normalized
+    assert "fastapi/params.py:745" in normalized
+    assert "fastapi.param_functions.py" not in normalized
+    assert "some.other.py" in normalized
+    assert "fastapi/routing.py:10" in normalized
+
+
+def test_normalize_dotted_paths_without_evidence_is_a_no_op() -> None:
+    answer = "See fastapi.param_functions.py:2283"
+    assert _normalize_dotted_paths(answer, set()) == answer

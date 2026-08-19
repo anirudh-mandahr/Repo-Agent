@@ -45,6 +45,7 @@ class ExecutionPlan(BaseModel):
     search_terms: list[str] | None = None
     iteration: int = 1
     refinement_reason: str = ""
+    retry_tools: list[str] | None = None
 
 
 class EvidenceAssessment(BaseModel):

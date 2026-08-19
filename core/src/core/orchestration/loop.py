@@ -75,83 +75,90 @@ async def run_refinement_loop(
     iterations: list[PlanIteration] = []
     current = plan
     assessment = None
+    plan_started = time.monotonic()
 
-    for round_index in range(max_iterations):
-        if budget is not None and not budget.allow_new_call(token_ledger, correlation_id):
-            log.info(
-                "orchestrator.budget_exhausted",
-                ceiling=budget.exhausted,
-                iteration=round_index + 1,
-            )
-            break
-        if round_index > 0:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+    try:
+        for round_index in range(max_iterations):
+            if budget is not None and not budget.allow_new_call(token_ledger, correlation_id):
                 log.info(
-                    "orchestrator.plan_deadline",
+                    "orchestrator.budget_exhausted",
+                    ceiling=budget.exhausted,
                     iteration=round_index + 1,
-                    max_iterations=max_iterations,
                 )
                 break
-            if assessment is None:
-                break
-            follow_up = refine_plan(query, current, assessment)
-            if follow_up is None:
-                break
-            current = follow_up
+            if round_index > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    log.info(
+                        "orchestrator.plan_deadline",
+                        iteration=round_index + 1,
+                        max_iterations=max_iterations,
+                    )
+                    break
+                if assessment is None:
+                    break
+                follow_up = refine_plan(query, current, assessment)
+                if follow_up is None:
+                    break
+                current = follow_up
 
-        round_outputs = await run_plan(
-            current,
-            query=query,
-            context=context,
-            clients=clients,  # type: ignore[arg-type]
-            settings=settings,
-            correlation_id=correlation_id,
-            budget=budget,
-            token_ledger=token_ledger,
-        )
-        combined = (
-            merge_agent_outputs(combined, round_outputs) if combined else dict(round_outputs)
-        )
-        assessment = evaluate_evidence(query, current, combined)
-        if budget is not None:
-            budget.apply_prompt_reserve(
-                estimated_synthesis_prompt_tokens(
-                    query,
-                    combined,
-                    token_budget=settings.synthesis_prompt_token_budget,
-                    order=settings.prompt_truncation_order,
-                )
+            round_outputs = await run_plan(
+                current,
+                query=query,
+                context=context,
+                clients=clients,  # type: ignore[arg-type]
+                settings=settings,
+                correlation_id=correlation_id,
+                budget=budget,
+                token_ledger=token_ledger,
             )
-        search_terms: Sequence[str]
-        if current.search_terms:
-            search_terms = current.search_terms
-        else:
-            search_terms = current.intent.entities
-        tools = _tools_invoked(current, round_outputs)
-        iteration = PlanIteration(
-            iteration=current.iteration,
-            routing_mode=current.routing_mode,
-            agents=list(current.agents),
-            tools_invoked=tools,
-            search_terms=list(search_terms),
-            sufficient=assessment.sufficient,
-            reason=assessment.reason,
-            refinement=current.refinement_reason or None,
-        )
-        iterations.append(iteration)
-        log.info(
-            "orchestrator.plan_iteration",
-            iteration=iteration.iteration,
-            sufficient=iteration.sufficient,
-            reason=iteration.reason,
-            agents=iteration.agents,
-            tools_invoked=tools,
-        )
-        if assessment.sufficient:
-            break
-
-    return combined, iterations
+            combined = (
+                merge_agent_outputs(combined, round_outputs)
+                if combined
+                else dict(round_outputs)
+            )
+            assessment = evaluate_evidence(query, current, combined)
+            if budget is not None:
+                budget.apply_prompt_reserve(
+                    estimated_synthesis_prompt_tokens(
+                        query,
+                        combined,
+                        token_budget=settings.synthesis_prompt_token_budget,
+                        order=settings.prompt_truncation_order,
+                    )
+                )
+            search_terms: Sequence[str]
+            if current.search_terms:
+                search_terms = current.search_terms
+            else:
+                search_terms = current.intent.entities
+            tools = _tools_invoked(current, round_outputs)
+            iteration = PlanIteration(
+                iteration=current.iteration,
+                routing_mode=current.routing_mode,
+                agents=list(current.agents),
+                tools_invoked=tools,
+                search_terms=list(search_terms),
+                sufficient=assessment.sufficient,
+                reason=assessment.reason,
+                refinement=current.refinement_reason or None,
+            )
+            iterations.append(iteration)
+            log.info(
+                "orchestrator.plan_iteration",
+                iteration=iteration.iteration,
+                sufficient=iteration.sufficient,
+                reason=iteration.reason,
+                agents=iteration.agents,
+                tools_invoked=tools,
+            )
+            if assessment.sufficient:
+                break
+        return combined, iterations
+    finally:
+        plan_duration_s = max(0.0, time.monotonic() - plan_started)
+        if budget is not None:
+            budget.plan_duration_s = plan_duration_s
 
 
 __all__ = ["run_refinement_loop"]
