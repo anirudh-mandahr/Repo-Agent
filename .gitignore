@@ -19,3 +19,4 @@ learnings.md
 .vscode/
 docs/walkthrough.md
 .docker-vendor/
+docs/eval-runs/**/*.pkl

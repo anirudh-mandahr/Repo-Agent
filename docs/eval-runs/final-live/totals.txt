@@ -1,0 +1,1 @@
+{'provider': 'live', 'n_turns': 58, 'tokens_total': 856140, 'cost_usd': 2.1439664, 'latency_mean_ms': 14564.103448275862, 'model': 'anthropic/claude-sonnet-4.5', 'synthesis_model': 'openai/gpt-4.1-mini', 'routing_model': 'anthropic/claude-sonnet-4.5', 'ok': True, 'hard_assertions': True}
