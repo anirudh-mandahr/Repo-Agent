@@ -878,7 +878,7 @@ def render_model_bakeoff_markdown(
 
 BEGIN_MODEL_BAKEOFF = "<!-- BEGIN_MODEL_BAKEOFF -->"
 END_MODEL_BAKEOFF = "<!-- END_MODEL_BAKEOFF -->"
-DEFAULT_README = ROOT / "README.md"
+DEFAULT_README = ROOT / "docs" / "evaluation.md"
 
 
 def write_model_bakeoff_section(
@@ -887,18 +887,18 @@ def write_model_bakeoff_section(
     readme_path: Path | None = None,
     generated_on: date | None = None,
 ) -> Path:
-    """Replace or insert the marked model-bakeoff section in README.md.
+    """Replace or insert the marked model-bakeoff section in the evaluation doc.
 
     Args:
         reports: Routing and/or synthesis bake-offs.
-        readme_path: README to patch.
+        readme_path: Document to patch (defaults to ``docs/evaluation.md``).
         generated_on: Report date.
 
     Returns:
         Path written.
 
     Raises:
-        ValueError: When the README cannot be patched.
+        ValueError: When the document cannot be patched.
     """
     import re
 
@@ -916,4 +916,4 @@ def write_model_bakeoff_section(
     if marker in text:
         path.write_text(text.replace(marker, section + "\n" + marker, 1), encoding="utf-8")
         return path
-    raise ValueError("README.md is missing model-bakeoff and eval report markers")
+    raise ValueError(f"{path} is missing model-bakeoff and eval report markers")

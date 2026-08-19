@@ -1,4 +1,4 @@
-"""Render eval scorecards as markdown and patch README.md."""
+"""Render eval scorecards as markdown and patch the docs."""
 
 from __future__ import annotations
 
@@ -23,7 +23,12 @@ from core.eval.scoring import extract_citations
 
 BEGIN_MARKER = "<!-- BEGIN_EVAL_REPORT -->"
 END_MARKER = "<!-- END_EVAL_REPORT -->"
-DEFAULT_README = Path(__file__).resolve().parents[4] / "README.md"
+SUMMARY_BEGIN_MARKER = "<!-- BEGIN_EVAL_SUMMARY -->"
+SUMMARY_END_MARKER = "<!-- END_EVAL_SUMMARY -->"
+_ROOT = Path(__file__).resolve().parents[4]
+# Full report lives in docs/; README carries only the hoisted summary.
+DEFAULT_README = _ROOT / "docs" / "evaluation.md"
+DEFAULT_SUMMARY_DOC = _ROOT / "README.md"
 LAYER_FAIL_BLURB = (
     "Retrieval FAIL means the executed agents missed the label or the specialist "
     "payloads did not contain the labelled files (entity recall can still be 1.00 "
@@ -507,12 +512,12 @@ def write_readme_section(
     budget_comparison: BudgetComparison | None = None,
     companion: EvalScorecard | None = None,
 ) -> Path:
-    """Replace the marked eval section in README.md.
+    """Replace the marked eval section in the evaluation doc.
 
     Args:
         qa: Full QA scorecard.
         routing: Golden-set executed-plan scores.
-        readme_path: README to patch.
+        readme_path: Document to patch (defaults to ``docs/evaluation.md``).
         generated_on: Report date.
         budget_comparison: Optional budgets-on vs budgets-off scorecards.
         companion: Optional scorecard from the other provider.
@@ -521,7 +526,7 @@ def write_readme_section(
         Path written.
 
     Raises:
-        ValueError: When the README markers are missing.
+        ValueError: When the report markers are missing.
     """
     path = readme_path or DEFAULT_README
     text = path.read_text(encoding="utf-8")
@@ -537,6 +542,129 @@ def write_readme_section(
         flags=re.DOTALL,
     )
     if not pattern.search(text):
-        raise ValueError(f"README is missing {BEGIN_MARKER} / {END_MARKER} markers")
+        raise ValueError(f"{path} is missing {BEGIN_MARKER} / {END_MARKER} markers")
+    path.write_text(pattern.sub(section.rstrip(), text), encoding="utf-8")
+    return path
+
+
+def format_summary_tiers(tiers: Sequence[TierScorecard]) -> str:
+    """Render the compact per-tier table hoisted into the README.
+
+    Args:
+        tiers: Aggregated tier rows.
+
+    Returns:
+        Markdown table without the executed-agent and degraded columns.
+    """
+    lines = [
+        "| Tier | n | Pass rate | Citation precision | Groundedness | Entity recall |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    by_name = {item.tier: item for item in tiers}
+    for name in TIERS:
+        item = by_name.get(name)
+        if item is None:
+            continue
+        refusal = ""
+        if item.refusal is not None:
+            refusal = f" (refusal {_pct(item.refusal)})"
+        lines.append(
+            f"| {item.tier} | {item.n} | {_pct(item.pass_rate)}{refusal} | "
+            f"{_quality_cell(item.citation_precision, item.citation_excluded)} | "
+            f"{_quality_cell(item.groundedness, item.groundedness_excluded)} | "
+            f"{_pct(item.entity_recall)} |"
+        )
+    return "\n".join(lines)
+
+
+def format_summary_metrics(metrics: Sequence[MetricScore]) -> str:
+    """Render gated metrics without the detail column, for the README summary.
+
+    Args:
+        metrics: Named metric scores.
+
+    Returns:
+        Markdown table, or an empty string when there are no metrics.
+    """
+    if not metrics:
+        return ""
+    lines = [
+        "| Gated metric | Score | n | Status |",
+        "| --- | ---: | ---: | --- |",
+    ]
+    for item in metrics:
+        if item.n == 0 and item.name in {"citation_precision", "groundedness"}:
+            status = "n/a"
+            score = "n/a"
+        else:
+            status = "PASS" if item.passed else "FAIL"
+            score = f"{item.value:.2f}"
+        lines.append(f"| `{item.name}` | {score} | {item.n} | {status} |")
+    return "\n".join(lines)
+
+
+def render_summary_section(
+    scorecard: EvalScorecard,
+    *,
+    generated_on: date | None = None,
+    report_link: str = "docs/evaluation.md",
+) -> str:
+    """Markdown summary block for the README, linking to the full report.
+
+    Args:
+        scorecard: Scorecard to summarize (live when one is available).
+        generated_on: Report date.
+        report_link: Relative path to the full evaluation document.
+
+    Returns:
+        Markdown including the summary markers.
+    """
+    day = (generated_on or date.today()).isoformat()
+    kind = "Live LLM run" if scorecard.provider == "live" else "Offline stub run"
+    turns = sum(item.n for item in scorecard.tiers)
+    parts = [
+        SUMMARY_BEGIN_MARKER,
+        f"{kind} over all {turns} labelled turns in `evals/qa.jsonl` ({day}). "
+        f"Full scorecard, per-turn verdicts, and the model bake-off: "
+        f"**[{report_link}]({report_link})**.",
+        "",
+        format_summary_tiers(scorecard.tiers),
+        "",
+        format_summary_metrics(scorecard.metrics),
+        SUMMARY_END_MARKER,
+    ]
+    return "\n".join(parts).rstrip() + "\n"
+
+
+def write_summary_section(
+    scorecard: EvalScorecard,
+    *,
+    summary_path: Path | None = None,
+    generated_on: date | None = None,
+) -> Path:
+    """Replace the marked summary block in the README.
+
+    Args:
+        scorecard: Scorecard to summarize.
+        summary_path: Document to patch (defaults to the repo ``README.md``).
+        generated_on: Report date.
+
+    Returns:
+        Path written.
+
+    Raises:
+        ValueError: When the summary markers are missing.
+    """
+    path = summary_path or DEFAULT_SUMMARY_DOC
+    text = path.read_text(encoding="utf-8")
+    pattern = re.compile(
+        re.escape(SUMMARY_BEGIN_MARKER) + r".*?" + re.escape(SUMMARY_END_MARKER),
+        flags=re.DOTALL,
+    )
+    if not pattern.search(text):
+        raise ValueError(
+            f"{path} is missing {SUMMARY_BEGIN_MARKER} / {SUMMARY_END_MARKER} markers"
+        )
+    section = render_summary_section(scorecard, generated_on=generated_on)
     path.write_text(pattern.sub(section.rstrip(), text), encoding="utf-8")
     return path

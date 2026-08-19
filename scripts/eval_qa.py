@@ -17,7 +17,12 @@ from core.eval.harness import (
     run_qa_eval,
 )
 from core.eval.models import EvalScorecard
-from core.eval.report import format_budget_comparison, format_scorecard_text, write_readme_section
+from core.eval.report import (
+    format_budget_comparison,
+    format_scorecard_text,
+    write_readme_section,
+    write_summary_section,
+)
 from core.settings import AnalysisSettings
 
 
@@ -72,7 +77,8 @@ def main() -> None:
             budget_comparison=comparison,
             companion=companion,
         )
-        print("Wrote eval scorecard into README.md")
+        write_summary_section(report)
+        print("Wrote eval scorecard into docs/evaluation.md and the README summary")
     raise SystemExit(0 if report.ok else 1)
 
 

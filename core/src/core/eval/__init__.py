@@ -29,6 +29,7 @@ from core.eval.report import (
     format_scorecard_text,
     render_readme_section,
     write_readme_section,
+    write_summary_section,
 )
 from core.eval.scoring import (
     agents_from_tools_invoked,
@@ -66,4 +67,5 @@ __all__ = [
     "score_retrieval_correctness",
     "score_turn",
     "write_readme_section",
+    "write_summary_section",
 ]

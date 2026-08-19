@@ -67,7 +67,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--write-readme",
         action="store_true",
-        help="Patch README.md model-bakeoff section.",
+        help="Patch the docs/evaluation.md model-bakeoff section.",
     )
     return parser.parse_args(argv)
 
@@ -154,7 +154,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(format_purpose_table(report), flush=True)
     if args.write_readme:
         write_model_bakeoff_section(reports)
-        print("Wrote model bake-off tables into README.md", flush=True)
+        print("Wrote model bake-off tables into docs/evaluation.md", flush=True)
 
 
 if __name__ == "__main__":
