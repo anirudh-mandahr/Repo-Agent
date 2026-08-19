@@ -19,7 +19,7 @@ from core.querying.safety import QueryRejected, guard_readonly, has_limit
         ("MATCH (n) REMOVE n.x", "REMOVE"),
         ("DROP CONSTRAINT module_qualified_name", "DROP"),
         ("CALL db.labels()", "CALL db.*"),
-        ("call db.index.fulltext.queryNodes('x', 'y')", "CALL db.*"),
+        ("CALL db.index.fulltext.createNodeIndex('x', ['Y'], ['z'])", "CALL db.*"),
         ("LOAD CSV FROM 'file:///x.csv' AS row RETURN row", "LOAD CSV"),
         ("load csv FROM 'file:///x.csv' AS row RETURN row", "LOAD CSV"),
         ("MATCH (n) /* comment */ DELETE n", "DELETE"),
@@ -47,6 +47,10 @@ def test_guard_readonly_rejects_write_clauses(cypher: str, clause: str) -> None:
         "MATCH (n) RETURN n // DELETE",
         "MATCH (n) RETURN 'LOAD CSV' AS hint",
         "CALL { MATCH (n) RETURN n } RETURN n",
+        "CALL db.index.fulltext.queryNodes($index_name, $lucene_query) "
+        "YIELD node, score RETURN node",
+        "CALL db.index.vector.queryNodes($index_name, $top_k, $query_vector) "
+        "YIELD node, score RETURN node",
         "MATCH (n) RETURN n LIMIT 10",
         "RETURN 1",
     ],
@@ -73,6 +77,15 @@ def test_guard_readonly_rejects_earliest_write_clause() -> None:
         guard_readonly("MATCH (n) SET n.x = 1 DELETE n")
 
     assert exc_info.value.clause == "SET"
+
+
+def test_guard_readonly_still_rejects_other_db_calls_beside_fulltext_query() -> None:
+    with pytest.raises(QueryRejected) as exc_info:
+        guard_readonly(
+            "CALL db.index.fulltext.queryNodes($index_name, $lucene_query) "
+            "YIELD node CALL db.labels() YIELD label RETURN label"
+        )
+    assert exc_info.value.clause == "CALL db.*"
 
 
 def test_guard_readonly_ignores_write_words_inside_identifiers() -> None:

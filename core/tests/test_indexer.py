@@ -97,6 +97,15 @@ def test_new_file_is_upserted_without_delete(tmp_path: Path) -> None:
     file_rows = next(rows for query, rows in client.writes if "MERGE (f:File" in query)
     assert file_rows[0]["path"] == "sample_module.py"
     assert file_rows[0]["content_hash"] == hash_file(tmp_path / "sample_module.py")
+    embedding_rows = next(
+        rows for query, rows in client.writes if "n.embedding = row.embedding" in query
+    )
+    assert embedding_rows
+    assert len(embedding_rows[0]["embedding"]) == 256
+    names = {row["qualified_name"] for row in embedding_rows}
+    assert "sample_module.helper" in names
+    assert "sample_module.Worker" in names
+    assert any(row["embedding_text"] for row in embedding_rows)
 
 
 def test_unchanged_hash_is_skipped(tmp_path: Path) -> None:
@@ -107,8 +116,22 @@ def test_unchanged_hash_is_skipped(tmp_path: Path) -> None:
     assert report.files_indexed == 0
     assert report.files_skipped == 1
     assert report.nodes_written == 0
+    assert report.mode == "incremental"
     assert len(client.writes) == 1
     assert "MERGE (m:Meta {key: row.key})" in client.writes[0][0]
+
+
+def test_full_mode_reindexes_unchanged_hash(tmp_path: Path) -> None:
+    path = _write_sample(tmp_path)
+    client = RecordingClient(hashes={"sample_module.py": hash_file(path)})
+    report = index_repository(
+        client, tmp_path, skip_tests=True, skip_docs=True, mode="full"
+    )
+    assert report.mode == "full"
+    assert report.files_seen == 1
+    assert report.files_indexed == 1
+    assert report.files_skipped == 0
+    assert report.nodes_written > 0
 
 
 def test_changed_hash_deletes_subtree_then_upserts(tmp_path: Path) -> None:
@@ -212,7 +235,7 @@ def test_parse_errors_are_collected_and_other_files_indexed(tmp_path: Path) -> N
     assert report.parse_errors[0].message
 
 
-def test_tests_and_docs_dirs_are_skipped(tmp_path: Path) -> None:
+def test_tests_and_docs_dirs_are_skipped_in_fast_profile(tmp_path: Path) -> None:
     _write_sample(tmp_path, "app.py")
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_app.py").write_text("def test_ok() -> None:\n    return None\n")
@@ -223,6 +246,36 @@ def test_tests_and_docs_dirs_are_skipped(tmp_path: Path) -> None:
     assert report.files_seen == 1
     file_rows = next(rows for query, rows in client.writes if "MERGE (f:File" in query)
     assert file_rows[0]["path"] == "app.py"
+
+
+def test_default_index_includes_tests_and_docs(tmp_path: Path) -> None:
+    _write_sample(tmp_path, "app.py")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_app.py").write_text("def test_ok() -> None:\n    return None\n")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "example.py").write_text("VALUE = 1\n")
+    client = RecordingClient()
+    report = index_repository(client, tmp_path, skip_tests=False, skip_docs=False)
+    assert report.files_seen == 3
+
+
+def test_stale_file_nodes_are_purged(tmp_path: Path) -> None:
+    path = _write_sample(tmp_path)
+    client = RecordingClient(
+        hashes={
+            "sample_module.py": hash_file(path),
+            "removed.py": "stale-hash",
+        }
+    )
+    report = index_repository(client, tmp_path, skip_tests=True, skip_docs=True)
+    assert report.files_skipped == 1
+    assert report.files_indexed == 0
+    assert report.files_purged == 1
+    delete_writes = [
+        (query, rows) for query, rows in client.writes if "DETACH DELETE" in query
+    ]
+    assert delete_writes
+    assert delete_writes[0][1] == [{"path": "removed.py"}]
 
 
 def test_already_running_report_status() -> None:

@@ -27,12 +27,24 @@ class QueryRejected(Exception):
     """Raised when ``guard_readonly`` finds a write clause."""
 
     def __init__(self, clause: str) -> None:
+        """Store the rejected write clause.
+
+        Args:
+            clause: Write keyword that triggered rejection.
+        """
         self.clause = clause
         super().__init__(f"rejected write clause: {clause}")
 
 
 def strip_comments_and_strings(cypher: str) -> str:
-    """Remove comments and mask string/identifier literals, preserving layout."""
+    """Remove comments and mask string/identifier literals, preserving layout.
+    
+    Args:
+        cypher: str.
+
+    Returns:
+        str.
+    """
     out: list[str] = []
     i = 0
     length = len(cypher)
@@ -73,18 +85,48 @@ def strip_comments_and_strings(cypher: str) -> str:
 
 
 def normalize_cypher(cypher: str) -> str:
-    """Comment-stripped, string-masked, uppercase copy used for keyword scans."""
+    """Comment-stripped, string-masked, uppercase copy used for keyword scans.
+    
+    Args:
+        cypher: str.
+
+    Returns:
+        str.
+    """
     return strip_comments_and_strings(cypher).upper()
 
 
 def guard_readonly(cypher: str) -> str:
-    """Reject Cypher that contains a write clause. Returns ``cypher`` unchanged."""
+    """Reject Cypher that contains a write clause. Returns ``cypher`` unchanged.
+    
+    Args:
+        cypher: str.
+
+    Returns:
+        str.
+
+    Raises:
+        QueryRejected: See exception message.
+    """
     normalized = normalize_cypher(cypher)
     earliest: tuple[int, str] | None = None
     for clause, pattern in _CLAUSE_PATTERNS:
         match = pattern.search(normalized)
         if match is None:
             continue
+        if clause == "CALL db.*":
+            forbidden: re.Match[str] | None = None
+            for candidate in pattern.finditer(normalized):
+                snippet = normalized[candidate.start() :]
+                if snippet.startswith("CALL DB.INDEX.FULLTEXT.QUERYNODES"):
+                    continue
+                if snippet.startswith("CALL DB.INDEX.VECTOR.QUERYNODES"):
+                    continue
+                forbidden = candidate
+                break
+            if forbidden is None:
+                continue
+            match = forbidden
         start = match.start()
         if earliest is None or start < earliest[0]:
             earliest = (start, clause)
@@ -94,5 +136,12 @@ def guard_readonly(cypher: str) -> str:
 
 
 def has_limit(cypher: str) -> bool:
-    """Return True when a LIMIT clause is present outside comments and strings."""
+    """Return True when a LIMIT clause is present outside comments and strings.
+    
+    Args:
+        cypher: str.
+
+    Returns:
+        bool.
+    """
     return _LIMIT_RE.search(normalize_cypher(cypher)) is not None

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import ast
 import hashlib
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from core.settings import IndexingSettings
+
+SOURCE_SUMMARY_MAX_LINES = 24
 
 
 class ParsedParameter(BaseModel):
@@ -38,6 +41,7 @@ class ParsedClass(BaseModel):
     line_start: int
     line_end: int
     docstring: ParsedDocstring | None = None
+    source_summary: str = ""
 
 
 class ParsedCallable(BaseModel):
@@ -52,6 +56,7 @@ class ParsedCallable(BaseModel):
     is_async: bool
     calls: list[str] = Field(default_factory=list)
     docstring: ParsedDocstring | None = None
+    source_summary: str = ""
 
 
 class ParsedImport(BaseModel):
@@ -101,17 +106,39 @@ class ExtractedGraph(BaseModel):
 
 
 def hash_bytes(data: bytes) -> str:
-    """Return the SHA-256 hex digest of ``data``."""
+    """Return the SHA-256 hex digest of ``data``.
+    
+    Args:
+        data: bytes.
+
+    Returns:
+        str.
+    """
     return hashlib.sha256(data).hexdigest()
 
 
 def hash_file(path: str | Path) -> str:
-    """Return the SHA-256 hex digest of the file's bytes."""
+    """Return the SHA-256 hex digest of the file's bytes.
+    
+    Args:
+        path: str | Path.
+
+    Returns:
+        str.
+    """
     return hash_bytes(Path(path).read_bytes())
 
 
 def module_name_from_path(path: Path, repo_root: Path) -> str:
-    """Derive a dotted module name from ``path`` relative to ``repo_root``."""
+    """Derive a dotted module name from ``path`` relative to ``repo_root``.
+    
+    Args:
+        path: Path.
+        repo_root: Path.
+
+    Returns:
+        str.
+    """
     try:
         rel = path.resolve().relative_to(repo_root.resolve())
     except ValueError:
@@ -123,7 +150,15 @@ def module_name_from_path(path: Path, repo_root: Path) -> str:
 
 
 def parse_file(path: str | Path, repo_root: str | Path | None = None) -> ParsedFile:
-    """Parse ``path`` into a ``ParsedFile``. Syntax errors are recorded, never raised."""
+    """Parse ``path`` into a ``ParsedFile``. Syntax errors are recorded, never raised.
+    
+    Args:
+        path: str | Path.
+        repo_root: str | Path | None.
+
+    Returns:
+        ParsedFile.
+    """
     file_path = Path(path)
     root = Path(repo_root) if repo_root is not None else file_path.parent
     rel = _relative_posix(file_path, root)
@@ -133,7 +168,16 @@ def parse_file(path: str | Path, repo_root: str | Path | None = None) -> ParsedF
 
 
 def parse_code(source: str, *, path: str = "<string>", module: str = "<string>") -> ParsedFile:
-    """Parse a source string into a ``ParsedFile``. Syntax errors are recorded, never raised."""
+    """Parse a source string into a ``ParsedFile``. Syntax errors are recorded, never raised.
+    
+    Args:
+        source: str.
+        path: str.
+        module: str.
+
+    Returns:
+        ParsedFile.
+    """
     return _parse_source(source.encode("utf-8"), rel=path, module=module, filename=path)
 
 
@@ -141,7 +185,15 @@ def parse_path_or_code(
     path_or_code: str,
     repo_root: str | Path | None = None,
 ) -> ParsedFile:
-    """Parse ``path_or_code`` as a file path if it exists, otherwise as source."""
+    """Parse ``path_or_code`` as a file path if it exists, otherwise as source.
+    
+    Args:
+        path_or_code: str.
+        repo_root: str | Path | None.
+
+    Returns:
+        ParsedFile.
+    """
     settings_root = (
         Path(repo_root) if repo_root is not None else Path(IndexingSettings.from_env().repo_root)
     )
@@ -166,7 +218,15 @@ def parse_python_ast(
     path_or_code: str,
     repo_root: str | Path | None = None,
 ) -> ParsedFile:
-    """Thin wrapper: parse a path or source string into ``ParsedFile``."""
+    """Thin wrapper: parse a path or source string into ``ParsedFile``.
+    
+    Args:
+        path_or_code: str.
+        repo_root: str | Path | None.
+
+    Returns:
+        ParsedFile.
+    """
     return parse_path_or_code(path_or_code, repo_root=repo_root)
 
 
@@ -174,12 +234,27 @@ def extract_entities(
     path_or_code: str,
     repo_root: str | Path | None = None,
 ) -> ExtractedGraph:
-    """Return flat entity and relationship lists derived from a ``ParsedFile``."""
+    """Return flat entity and relationship lists derived from a ``ParsedFile``.
+    
+    Args:
+        path_or_code: str.
+        repo_root: str | Path | None.
+
+    Returns:
+        ExtractedGraph.
+    """
     return extracted_graph_from_parsed(parse_python_ast(path_or_code, repo_root=repo_root))
 
 
 def extracted_graph_from_parsed(parsed: ParsedFile) -> ExtractedGraph:
-    """Flatten a ``ParsedFile`` into entity and relationship dicts."""
+    """Flatten a ``ParsedFile`` into entity and relationship dicts.
+    
+    Args:
+        parsed: ParsedFile.
+
+    Returns:
+        ExtractedGraph.
+    """
     entities: list[dict[str, Any]] = []
     relationships: list[dict[str, Any]] = []
 
@@ -361,7 +436,6 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 
 def _parse_source(raw: bytes, *, rel: str, module: str, filename: str) -> ParsedFile:
     content_hash = hash_bytes(raw)
-    line_end = len(raw.splitlines()) or 1
 
     try:
         tree = ast.parse(raw, filename=filename)
@@ -370,7 +444,8 @@ def _parse_source(raw: bytes, *, rel: str, module: str, filename: str) -> Parsed
             path=rel,
             module=module,
             content_hash=content_hash,
-            line_end=line_end,
+            line_start=1,
+            line_end=1,
             error=str(exc),
         )
     except Exception as exc:  # pragma: no cover - defensive
@@ -378,7 +453,8 @@ def _parse_source(raw: bytes, *, rel: str, module: str, filename: str) -> Parsed
             path=rel,
             module=module,
             content_hash=content_hash,
-            line_end=line_end,
+            line_start=1,
+            line_end=1,
             error=str(exc),
         )
 
@@ -387,6 +463,11 @@ def _parse_source(raw: bytes, *, rel: str, module: str, filename: str) -> Parsed
     methods: list[ParsedCallable] = []
     imports: list[ParsedImport] = []
     calls: list[ParsedCall] = []
+    try:
+        source = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        source = raw.decode("utf-8", errors="replace")
+    source_lines = source.splitlines()
 
     _collect_imports(tree.body, imports)
     _collect_definitions(
@@ -397,14 +478,17 @@ def _parse_source(raw: bytes, *, rel: str, module: str, filename: str) -> Parsed
         functions=functions,
         methods=methods,
         calls=calls,
+        source_lines=source_lines,
     )
+
+    header_start, header_end = module_header_span(tree)
 
     return ParsedFile(
         path=rel,
         module=module,
         content_hash=content_hash,
-        line_start=1,
-        line_end=line_end,
+        line_start=header_start,
+        line_end=header_end,
         docstring=_parse_docstring(tree),
         classes=classes,
         functions=functions,
@@ -412,6 +496,40 @@ def _parse_source(raw: bytes, *, rel: str, module: str, filename: str) -> Parsed
         imports=imports,
         calls=calls,
     )
+
+
+def module_header_span(tree: ast.Module) -> tuple[int, int]:
+    """Citation span for a Module: docstring if present, else leading imports.
+
+    Class and function spans are independent and must not use this helper.
+    A Module is never cited as ``1–<file length>``.
+
+    Args:
+        tree: Parsed module AST.
+
+    Returns:
+        Inclusive ``(line_start, line_end)`` for the module header.
+    """
+    body = list(tree.body)
+    if body:
+        first = body[0]
+        if isinstance(first, ast.Expr):
+            value = first.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                start, end = _span(first)
+                return start, end
+    header_end = 1
+    saw_import = False
+    for stmt in body:
+        if isinstance(stmt, ast.Import | ast.ImportFrom):
+            _, end = _span(stmt)
+            header_end = max(header_end, end)
+            saw_import = True
+            continue
+        break
+    if saw_import:
+        return 1, header_end
+    return 1, 1
 
 
 def _relative_posix(path: Path, repo_root: Path) -> str:
@@ -448,6 +566,16 @@ def _collect_imports(body: list[ast.stmt], imports: list[ParsedImport]) -> None:
             else:
                 alias_value = None
             imports.append(ParsedImport(module=module, names=names, alias=alias_value))
+        elif isinstance(node, ast.If) and _is_type_checking(node.test):
+            _collect_imports(node.body, imports)
+
+
+def _is_type_checking(test: ast.expr) -> bool:
+    if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
+        return True
+    if isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING":
+        return True
+    return False
 
 
 def _from_module(module: str | None, level: int) -> str | None:
@@ -466,10 +594,11 @@ def _collect_definitions(
     functions: list[ParsedCallable],
     methods: list[ParsedCallable],
     calls: list[ParsedCall],
+    source_lines: Sequence[str],
 ) -> None:
     for node in body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            parsed = _parse_callable(node, namespace)
+            parsed = _parse_callable(node, namespace, source_lines)
             if class_qn is not None:
                 methods.append(parsed)
             else:
@@ -490,6 +619,7 @@ def _collect_definitions(
                     line_start=start,
                     line_end=end,
                     docstring=_parse_docstring(node),
+                    source_summary=_source_summary(source_lines, start, end),
                 )
             )
             _collect_definitions(
@@ -500,12 +630,14 @@ def _collect_definitions(
                 functions=functions,
                 methods=methods,
                 calls=calls,
+                source_lines=source_lines,
             )
 
 
 def _parse_callable(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
     namespace: str,
+    source_lines: Sequence[str],
 ) -> ParsedCallable:
     start, end = _span(node)
     return ParsedCallable(
@@ -518,7 +650,17 @@ def _parse_callable(
         is_async=isinstance(node, ast.AsyncFunctionDef),
         calls=_collect_calls(node),
         docstring=_parse_docstring(node),
+        source_summary=_source_summary(source_lines, start, end),
     )
+
+
+def _source_summary(lines: Sequence[str], start: int, end: int) -> str:
+    if start < 1:
+        return ""
+    chunk = list(lines[start - 1 : max(start, end)])
+    if len(chunk) > SOURCE_SUMMARY_MAX_LINES:
+        chunk = chunk[:SOURCE_SUMMARY_MAX_LINES]
+    return "\n".join(chunk).strip()
 
 
 def _parse_parameters(args: ast.arguments) -> list[ParsedParameter]:
@@ -588,21 +730,42 @@ def _collect_calls(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]
 
 
 class _CallCollector(ast.NodeVisitor):
-    """Collect ``Name`` / ``Attribute`` callees; skip nested defs."""
+    """Collect ``Name`` / ``Attribute`` callees, including nested function bodies."""
 
     def __init__(self) -> None:
+        """Create a visitor that records callee names."""
         self.calls: list[str] = []
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        return
+        """Visit functiondef.
+        
+        Args:
+            node: ast.FunctionDef.
+        """
+        self.generic_visit(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        return
+        """Visit asyncfunctiondef.
+        
+        Args:
+            node: ast.AsyncFunctionDef.
+        """
+        self.generic_visit(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        """Visit classdef.
+        
+        Args:
+            node: ast.ClassDef.
+        """
         return
 
     def visit_Call(self, node: ast.Call) -> None:
+        """Visit call.
+        
+        Args:
+            node: ast.Call.
+        """
         name = _callee_name(node.func)
         if name:
             self.calls.append(name)

@@ -6,8 +6,11 @@ from typing import TYPE_CHECKING, Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from core.health import HealthStatus, agent_health
+from core.health import HealthStatus, check_graph_query_health
 from core.logging import bind_correlation_id, configure_logging, get_logger
+from core.mcp.context import bind_mcp_context
+from core.mcp.server import run_agent_mcp
+from core.querying.embeddings import default_embedding_provider
 from core.querying.service import (
     EntityQueryResult,
     GraphQueryService,
@@ -18,7 +21,7 @@ from core.querying.service import (
     RelatedQueryResult,
 )
 from core.querying.templates import DEFAULT_TRACE_DEPTH
-from core.settings import AgentRuntimeSettings
+from core.settings import AgentRuntimeSettings, GraphQuerySettings
 
 AGENT_NAME = "graph_query"
 DEFAULT_PORT = 8003
@@ -41,36 +44,18 @@ mcp = FastMCP(
     json_response=True,
 )
 
-_service = GraphQueryService()
-
-
-def _correlation_id_from_meta(ctx: ToolContext | None) -> str | None:
-    if ctx is None:
-        return None
-    try:
-        meta = ctx.request_context.meta
-    except ValueError:
-        return None
-    if meta is None:
-        return None
-    raw = getattr(meta, "correlation_id", None)
-    if raw is None and meta.model_extra:
-        raw = meta.model_extra.get("correlation_id")
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    return text or None
-
-
-def _bind_meta(ctx: ToolContext | None) -> str:
-    return bind_correlation_id(_correlation_id_from_meta(ctx))
+_gq_settings = GraphQuerySettings.from_env()
+_service = GraphQueryService(
+    embedding_provider=default_embedding_provider(),
+    embeddings_enabled=_gq_settings.embeddings_enabled,
+)
 
 
 @mcp.tool()
 def health(ctx: ToolContext | None = None) -> HealthStatus:
-    """Return agent liveness."""
-    _bind_meta(ctx)
-    status = agent_health(AGENT_NAME)
+    """Return agent liveness after probing Neo4j."""
+    bind_mcp_context(ctx)
+    status = check_graph_query_health()
     log.info("health.check", agent=AGENT_NAME, status=status.status)
     return status
 
@@ -81,8 +66,8 @@ def find_entity(
     entity_type: str | None = None,
     ctx: ToolContext | None = None,
 ) -> EntityQueryResult:
-    """Find Module/Class/Function/Method by name, or File by path."""
-    _bind_meta(ctx)
+    """Find Module/Class/Function/Method by exact name, full-text, or lexical hash."""
+    bind_mcp_context(ctx)
     result = _service.find_entity(name, entity_type)
     log.info(
         "query.find_entity",
@@ -98,13 +83,14 @@ def find_entity(
 @mcp.tool()
 def get_dependencies(name: str, ctx: ToolContext | None = None) -> NeighborQueryResult:
     """Return outgoing IMPORTS, DEPENDS_ON, and CALLS neighbors."""
-    _bind_meta(ctx)
+    bind_mcp_context(ctx)
     result = _service.get_dependencies(name)
     log.info(
         "query.get_dependencies",
         name=name,
         result_count=result.result_count,
         truncated=result.truncated,
+        total_count=result.total_count,
     )
     return result
 
@@ -112,13 +98,14 @@ def get_dependencies(name: str, ctx: ToolContext | None = None) -> NeighborQuery
 @mcp.tool()
 def get_dependents(name: str, ctx: ToolContext | None = None) -> NeighborQueryResult:
     """Return incoming IMPORTS, DEPENDS_ON, and CALLS neighbors."""
-    _bind_meta(ctx)
+    bind_mcp_context(ctx)
     result = _service.get_dependents(name)
     log.info(
         "query.get_dependents",
         name=name,
         result_count=result.result_count,
         truncated=result.truncated,
+        total_count=result.total_count,
     )
     return result
 
@@ -130,7 +117,7 @@ def trace_imports(
     ctx: ToolContext | None = None,
 ) -> ImportTraceResult:
     """Follow IMPORTS and DEPENDS_ON chains from a module (depth cap default 5)."""
-    _bind_meta(ctx)
+    bind_mcp_context(ctx)
     result = _service.trace_imports(module, depth)
     log.info(
         "query.trace_imports",
@@ -149,7 +136,7 @@ def find_related(
     ctx: ToolContext | None = None,
 ) -> RelatedQueryResult:
     """Return neighbors along a spec relationship type, with direction."""
-    _bind_meta(ctx)
+    bind_mcp_context(ctx)
     result = _service.find_related(name, relationship_type)
     log.info(
         "query.find_related",
@@ -169,7 +156,7 @@ def execute_query(
     ctx: ToolContext | None = None,
 ) -> QueryResult:
     """Run a read-only Cypher query. Write clauses are rejected."""
-    _bind_meta(ctx)
+    bind_mcp_context(ctx)
     result = _service.execute_query(cypher, params)
     log.info(
         "query.execute_query",
@@ -182,7 +169,7 @@ def execute_query(
 @mcp.tool()
 def get_statistics(ctx: ToolContext | None = None) -> GraphStatistics:
     """Return label counts, relationship counts, and index metadata."""
-    _bind_meta(ctx)
+    bind_mcp_context(ctx)
     result = _service.get_statistics()
     log.info(
         "query.get_statistics",
@@ -196,7 +183,7 @@ def main() -> None:
     """Run the FastMCP server with streamable HTTP transport."""
     bind_correlation_id()
     log.info("agent.start", agent=AGENT_NAME, host=_settings.host, port=_settings.port)
-    mcp.run(transport="streamable-http")
+    run_agent_mcp(mcp, agent=AGENT_NAME)
 
 
 if __name__ == "__main__":

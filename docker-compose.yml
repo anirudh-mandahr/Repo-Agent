@@ -1,15 +1,32 @@
+x-agent-resources: &agent-resources
+  limits:
+    cpus: "1.0"
+    memory: 1G
+  reservations:
+    cpus: "0.10"
+    memory: 128M
+
 services:
   neo4j:
-    image: neo4j:5-community
+    image: neo4j:5-community@sha256:d9dd3dc7d1c78fa959191ff02dbdcbefadceaf83eee23428fb92a58cac8ad3fe
+    restart: unless-stopped
     environment:
-      NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/changeme123}
+      NEO4J_AUTH: ${NEO4J_AUTH:?Set NEO4J_AUTH in the environment or .env}
     ports:
       - "7474:7474"
       - "7687:7687"
     volumes:
       - neo4j_data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.25"
+          memory: 512M
     healthcheck:
-      test: ["CMD", "cypher-shell", "-u", "${NEO4J_USER:-neo4j}", "-p", "${NEO4J_PASSWORD:-changeme123}", "RETURN 1"]
+      test: ["CMD", "cypher-shell", "-u", "${NEO4J_USER:-neo4j}", "-p", "${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in the environment or .env}", "RETURN 1"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -20,30 +37,33 @@ services:
       dockerfile: Dockerfile
       args:
         PACKAGE: orchestrator
-    ports:
-      - "8001:8001"
+    restart: unless-stopped
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       MCP_HOST: ${MCP_HOST:-0.0.0.0}
       MCP_PORT: "8001"
+      MCP_SHARED_SECRET: ${GATEWAY_API_KEY:-dev-gateway-key}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-anthropic/claude-sonnet-4.5}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      ORCH_MODEL_ROUTING: ${ORCH_MODEL_ROUTING:-}
+      ORCH_MODEL_SYNTHESIS: ${ORCH_MODEL_SYNTHESIS:-openai/gpt-4.1-mini}
+      LLM_PROMPT_USD_PER_MILLION: ${LLM_PROMPT_USD_PER_MILLION:-3.0}
+      LLM_COMPLETION_USD_PER_MILLION: ${LLM_COMPLETION_USD_PER_MILLION:-15.0}
+      LLM_CACHED_PROMPT_USD_PER_MILLION: ${LLM_CACHED_PROMPT_USD_PER_MILLION:-0.30}
+      LLM_MODEL_PRICES_JSON: ${LLM_MODEL_PRICES_JSON:-}
+      LLM_PROMPT_CACHE: ${LLM_PROMPT_CACHE:-1}
+    deploy:
+      resources: *agent-resources
     depends_on:
       neo4j:
         condition: service_healthy
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import socket; socket.create_connection(('127.0.0.1', 8001), 2).close()",
-        ]
+      test: ["CMD", "python", "-m", "core.health", "--url", "http://127.0.0.1:8001/mcp"]
       interval: 5s
-      timeout: 3s
+      timeout: 10s
       retries: 20
-      start_period: 10s
+      start_period: 15s
 
   indexer:
     build:
@@ -51,37 +71,43 @@ services:
       dockerfile: Dockerfile
       args:
         PACKAGE: indexer
-    ports:
-      - "8002:8002"
+    restart: unless-stopped
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       MCP_HOST: ${MCP_HOST:-0.0.0.0}
       MCP_PORT: "8002"
+      MCP_SHARED_SECRET: ${GATEWAY_API_KEY:-dev-gateway-key}
       NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
       NEO4J_USER: ${NEO4J_USER:-neo4j}
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-changeme123}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in the environment or .env}
       REPO_URL: ${REPO_URL:-https://github.com/fastapi/fastapi}
       REPO_ROOT: /repo
-      INDEX_SKIP_TESTS: ${INDEX_SKIP_TESTS:-${INDEXER_SKIP_TESTS:-1}}
-      INDEX_SKIP_DOCS: ${INDEX_SKIP_DOCS:-${INDEXER_SKIP_DOCS:-1}}
-    user: "0:0"
+      INDEX_SKIP_TESTS: ${INDEX_SKIP_TESTS:-${INDEXER_SKIP_TESTS:-0}}
+      INDEX_SKIP_DOCS: ${INDEX_SKIP_DOCS:-${INDEXER_SKIP_DOCS:-0}}
+      INDEXER_CLONE_ALLOWED_HOSTS: ${INDEXER_CLONE_ALLOWED_HOSTS:-github.com}
+      INDEXER_CLONE_ALLOWED_SCHEMES: ${INDEXER_CLONE_ALLOWED_SCHEMES:-https}
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: "safe.directory"
+      GIT_CONFIG_VALUE_0: "*"
     volumes:
       - repo_data:/repo
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
     depends_on:
       neo4j:
         condition: service_healthy
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import socket; socket.create_connection(('127.0.0.1', 8002), 2).close()",
-        ]
+      test: ["CMD", "python", "-m", "core.health", "--url", "http://127.0.0.1:8002/mcp"]
       interval: 5s
-      timeout: 3s
+      timeout: 10s
       retries: 20
-      start_period: 10s
+      start_period: 15s
 
   graph_query:
     build:
@@ -89,30 +115,27 @@ services:
       dockerfile: Dockerfile
       args:
         PACKAGE: graph_query
-    ports:
-      - "8003:8003"
+    restart: unless-stopped
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       MCP_HOST: ${MCP_HOST:-0.0.0.0}
       MCP_PORT: "8003"
+      MCP_SHARED_SECRET: ${GATEWAY_API_KEY:-dev-gateway-key}
       NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
       NEO4J_USER: ${NEO4J_USER:-neo4j}
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-changeme123}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in the environment or .env}
+      GQ_EMBEDDINGS_ENABLED: ${GQ_EMBEDDINGS_ENABLED:-0}
+    deploy:
+      resources: *agent-resources
     depends_on:
       neo4j:
         condition: service_healthy
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import socket; socket.create_connection(('127.0.0.1', 8003), 2).close()",
-        ]
+      test: ["CMD", "python", "-m", "core.health", "--url", "http://127.0.0.1:8003/mcp"]
       interval: 5s
-      timeout: 3s
+      timeout: 10s
       retries: 20
-      start_period: 10s
+      start_period: 15s
 
   code_analyst:
     build:
@@ -120,36 +143,38 @@ services:
       dockerfile: Dockerfile
       args:
         PACKAGE: code_analyst
-    ports:
-      - "8004:8004"
+    restart: unless-stopped
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       MCP_HOST: ${MCP_HOST:-0.0.0.0}
       MCP_PORT: "8004"
+      MCP_SHARED_SECRET: ${GATEWAY_API_KEY:-dev-gateway-key}
       REPO_ROOT: /repo
       GRAPH_QUERY_MCP_URL: ${GRAPH_QUERY_MCP_URL:-http://graph_query:8003/mcp}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-anthropic/claude-sonnet-4.5}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      CA_MODEL_ANALYSIS: ${CA_MODEL_ANALYSIS:-}
+      LLM_PROMPT_USD_PER_MILLION: ${LLM_PROMPT_USD_PER_MILLION:-3.0}
+      LLM_COMPLETION_USD_PER_MILLION: ${LLM_COMPLETION_USD_PER_MILLION:-15.0}
+      LLM_CACHED_PROMPT_USD_PER_MILLION: ${LLM_CACHED_PROMPT_USD_PER_MILLION:-0.30}
+      LLM_MODEL_PRICES_JSON: ${LLM_MODEL_PRICES_JSON:-}
+      LLM_PROMPT_CACHE: ${LLM_PROMPT_CACHE:-1}
     volumes:
       - repo_data:/repo:ro
+    deploy:
+      resources: *agent-resources
     depends_on:
       neo4j:
         condition: service_healthy
       graph_query:
         condition: service_healthy
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import socket; socket.create_connection(('127.0.0.1', 8004), 2).close()",
-        ]
+      test: ["CMD", "python", "-m", "core.health", "--url", "http://127.0.0.1:8004/mcp"]
       interval: 5s
-      timeout: 3s
+      timeout: 10s
       retries: 20
-      start_period: 10s
+      start_period: 15s
 
   memory:
     build:
@@ -157,30 +182,30 @@ services:
       dockerfile: Dockerfile
       args:
         PACKAGE: memory
-    ports:
-      - "8005:8005"
+    restart: unless-stopped
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       MCP_HOST: ${MCP_HOST:-0.0.0.0}
       MCP_PORT: "8005"
+      MCP_SHARED_SECRET: ${GATEWAY_API_KEY:-dev-gateway-key}
       MEMORY_DB_PATH: /data/memory.db
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-anthropic/claude-sonnet-4.5}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      LLM_PROMPT_USD_PER_MILLION: ${LLM_PROMPT_USD_PER_MILLION:-3.0}
+      LLM_COMPLETION_USD_PER_MILLION: ${LLM_COMPLETION_USD_PER_MILLION:-15.0}
+      LLM_CACHED_PROMPT_USD_PER_MILLION: ${LLM_CACHED_PROMPT_USD_PER_MILLION:-0.30}
+      LLM_PROMPT_CACHE: ${LLM_PROMPT_CACHE:-1}
     volumes:
       - memory_data:/data
+    deploy:
+      resources: *agent-resources
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import socket; socket.create_connection(('127.0.0.1', 8005), 2).close()",
-        ]
+      test: ["CMD", "python", "-m", "core.health", "--url", "http://127.0.0.1:8005/mcp"]
       interval: 5s
-      timeout: 3s
+      timeout: 10s
       retries: 20
-      start_period: 10s
+      start_period: 15s
 
   gateway:
     build:
@@ -188,17 +213,24 @@ services:
       dockerfile: Dockerfile
       args:
         PACKAGE: gateway
+    restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       GATEWAY_HOST: ${GATEWAY_HOST:-0.0.0.0}
       GATEWAY_PORT: ${GATEWAY_PORT:-8000}
+      GATEWAY_REQUEST_TIMEOUT_S: ${GATEWAY_REQUEST_TIMEOUT_S:-10}
+      GATEWAY_CHAT_TIMEOUT_S: ${GATEWAY_CHAT_TIMEOUT_S:-90}
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:-dev-gateway-key}
+      MCP_SHARED_SECRET: ${GATEWAY_API_KEY:-dev-gateway-key}
       ORCHESTRATOR_MCP_URL: ${ORCHESTRATOR_MCP_URL:-http://orchestrator:8001/mcp}
       INDEXER_MCP_URL: ${INDEXER_MCP_URL:-http://indexer:8002/mcp}
       GRAPH_QUERY_MCP_URL: ${GRAPH_QUERY_MCP_URL:-http://graph_query:8003/mcp}
       CODE_ANALYST_MCP_URL: ${CODE_ANALYST_MCP_URL:-http://code_analyst:8004/mcp}
       MEMORY_MCP_URL: ${MEMORY_MCP_URL:-http://memory:8005/mcp}
+    deploy:
+      resources: *agent-resources
     depends_on:
       orchestrator:
         condition: service_healthy
@@ -216,7 +248,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=15)",
+          "import os, urllib.request; req = urllib.request.Request('http://127.0.0.1:8000/health', headers={'X-API-Key': os.environ.get('GATEWAY_API_KEY', '')}); urllib.request.urlopen(req, timeout=15)",
         ]
       interval: 10s
       timeout: 20s

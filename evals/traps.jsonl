@@ -1,2 +1,6 @@
 {"query":"How does Django's ORM lazy-load querysets?"}
 {"query":"Explain React's useEffect cleanup"}
+{"query":"How does Rails ActiveRecord implement callbacks?"}
+{"query":"Explain Kubernetes pod scheduling"}
+{"query":"How does PostgreSQL write-ahead logging work?"}
+{"query":"Explain TensorFlow GradientTape internals"}

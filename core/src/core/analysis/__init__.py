@@ -1,5 +1,6 @@
 """Code analysis: snippets from /repo, graph lookup, and structured LLM tools."""
 
+from core.analysis.graph_lookup import GraphQueryLookup, build_code_analyst_pool
 from core.analysis.models import (
     ClassAnalysis,
     FunctionAnalysis,
@@ -17,12 +18,14 @@ __all__ = [
     "CodeAnalystService",
     "FunctionAnalysis",
     "GraphLookup",
+    "GraphQueryLookup",
     "ImplementationComparison",
     "ImplementationExplanation",
     "PathTraversalError",
     "PatternAnalysis",
     "PatternInstance",
     "SnippetResult",
+    "build_code_analyst_pool",
     "get_snippet",
     "render_prompt",
     "resolve_repo_path",

@@ -174,7 +174,9 @@ async def run() -> None:
 
     cached_latency_factor = float(os.environ.get("SMOKE_CACHED_FACTOR", "0.35"))
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(
+        headers={"X-API-Key": os.environ.get("GATEWAY_API_KEY", "dev-gateway-key")}
+    ) as client:
         results: list[StepResult] = []
 
         def record(step: str, ok: bool, assertions: str, details: str) -> None:

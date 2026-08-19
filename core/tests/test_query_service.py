@@ -8,18 +8,31 @@ from typing import Any
 import pytest
 
 from core.graph.schema import FIND_ENTITY_LABELS, RELATIONSHIP_TYPES
+from core.querying.embeddings import (
+    HashingEmbeddingProvider,
+    cosine_similarity,
+    tokenize_for_embedding,
+)
 from core.querying.safety import QueryRejected
 from core.querying.service import (
+    DEFAULT_NEIGHBOR_BRANCH_LIMIT,
     DEFAULT_RESULT_LIMIT,
     READ_TIMEOUT_S,
     STATISTICS_TIMEOUT_S,
     GraphQueryService,
+    lucene_query,
 )
 
 
 class FakeClient:
-    def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        rows: list[dict[str, Any]] | None = None,
+        *,
+        by_query: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> None:
         self.rows = rows if rows is not None else []
+        self.by_query = by_query or {}
         self.queries: list[tuple[str, dict[str, Any], float]] = []
 
     def run_read(
@@ -29,8 +42,13 @@ class FakeClient:
         timeout_s: float = 10,
     ) -> list[dict[str, Any]]:
         self.queries.append((query, dict(params or {}), timeout_s))
+        for needle, rows in self.by_query.items():
+            if needle in query:
+                return list(rows)
         if "UNWIND labels(n)" in query and "count(*) AS count" in query:
             return [{"label": "Module", "count": 2}, {"label": "Meta", "count": 1}]
+        if "sum(c) AS total" in query:
+            return [{"total": len(self.rows)}]
         if "MATCH ()-[r]->()" in query and "count(*) AS count" in query:
             return [{"relationship_type": "CONTAINS", "count": 4}]
         if "MATCH (m:Meta {key: 'index_version'})" in query:
@@ -125,10 +143,60 @@ def test_get_dependencies_maps_outgoing_neighbors() -> None:
     result = GraphQueryService(client).get_dependencies("fastapi.applications")
     assert result.name == "fastapi.applications"
     assert result.result_count == 1
+    assert result.total_count == 1
+    assert result.truncated is False
     hit = result.neighbors[0]
     assert hit.relationship_type == "DEPENDS_ON"
     assert hit.direction == "outgoing"
     assert hit.qualified_name == "fastapi.routing"
+    assert hit.hop is None
+
+
+def test_get_dependencies_records_class_hops() -> None:
+    client = FakeClient(
+        [
+            {
+                "relationship_type": "IMPORTS",
+                "direction": "outgoing",
+                "labels": ["Import"],
+                "name": "APIRouter",
+                "qualified_name": "fastapi.routing.APIRouter",
+                "module": None,
+                "path": None,
+                "file_path": "fastapi/routing.py",
+                "hop": "Class->Module",
+            },
+            {
+                "relationship_type": "CALLS",
+                "direction": "outgoing",
+                "labels": ["Method"],
+                "name": "add_api_route",
+                "qualified_name": "fastapi.routing.APIRouter.add_api_route",
+                "module": None,
+                "path": None,
+                "file_path": "fastapi/routing.py",
+                "hop": "Class->Method",
+            },
+        ]
+    )
+    result = GraphQueryService(client).get_dependencies("FastAPI")
+    assert result.hops == ["Class->Module", "Class->Method"]
+    assert result.neighbors[0].hop == "Class->Module"
+    assert result.neighbors[1].hop == "Class->Method"
+
+
+def test_trace_imports_records_class_to_module_hop() -> None:
+    client = FakeClient(
+        [
+            {
+                "nodes": ["fastapi.applications", "fastapi.routing"],
+                "hop": "Class->Module",
+            }
+        ]
+    )
+    result = GraphQueryService(client).trace_imports("FastAPI", depth=3)
+    assert result.hop == "Class->Module"
+    assert result.paths == [["fastapi.applications", "fastapi.routing"]]
 
 
 def test_get_dependents_maps_incoming_neighbors() -> None:
@@ -204,6 +272,27 @@ def test_truncated_when_default_limit_is_hit() -> None:
     assert result.truncated is True
 
 
+def test_neighbor_query_reports_total_and_truncated_when_count_exceeds_rows() -> None:
+    rows = [
+        {
+            "relationship_type": "CALLS",
+            "direction": "incoming",
+            "labels": ["Function"],
+            "name": f"fn_{i}",
+            "qualified_name": f"mod.fn_{i}",
+            "file_path": "x.py",
+        }
+        for i in range(DEFAULT_NEIGHBOR_BRANCH_LIMIT)
+    ]
+    client = FakeClient(rows, by_query={"sum(c) AS total": [{"total": 87}]})
+    result = GraphQueryService(client).get_dependents("APIRouter")
+    assert result.result_count == DEFAULT_NEIGHBOR_BRANCH_LIMIT
+    assert result.total_count == 87
+    assert result.truncated is True
+    params = [item[1] for item in client.queries]
+    assert any(item.get("branch_limit") == DEFAULT_NEIGHBOR_BRANCH_LIMIT for item in params)
+
+
 def test_get_statistics_returns_counts_and_index_metadata() -> None:
     client = FakeClient()
     result = GraphQueryService(client).get_statistics()
@@ -215,3 +304,317 @@ def test_get_statistics_returns_counts_and_index_metadata() -> None:
     assert result.index_version == "abc123"
     assert result.last_indexed_at == "2026-08-18T00:00:00+00:00"
     assert all(timeout == STATISTICS_TIMEOUT_S for _query, _params, timeout in client.queries[-3:])
+
+
+def test_lucene_query_uses_name_fields_for_identifiers() -> None:
+    query = lucene_query("Django")
+    assert "name:" in query
+    assert "qualified_name:" in query
+    assert "text:" not in query
+
+
+def test_lucene_query_ors_conceptual_tokens() -> None:
+    query = lucene_query("How does dependency injection work?")
+    assert " AND " not in query
+    assert " OR " in query
+    assert "dependency" in query
+    assert "injection" in query
+
+
+def test_lucene_query_drops_question_boilerplate() -> None:
+    query = lucene_query(
+        "How does dependency injection work and show me examples from the codebase"
+    )
+    assert "dependency" in query
+    assert "injection" in query
+    assert " OR " in query
+    assert " AND " not in query
+    assert "codebase" not in query.lower()
+    assert "How" not in query
+
+
+def test_lucene_query_requires_foreign_proper_nouns() -> None:
+    query = lucene_query("How does Django's ORM lazy-load querysets?")
+    assert "Django" in query
+    assert " AND " in query
+    assert "name:\"Django\"" in query or 'name:"Django"' in query
+
+
+def test_lucene_query_ors_request_validation_tokens() -> None:
+    query = lucene_query("How does FastAPI handle request validation?")
+    assert "FastAPI" in query
+    assert "request" in query
+    assert "validation" in query
+    assert " OR " in query
+
+
+def test_cosine_similarity_is_1_for_identical_vectors() -> None:
+    assert cosine_similarity([1.0, 0.0], [1.0, 0.0]) == 1.0
+    assert cosine_similarity([1.0, 0.0], [0.0, 1.0]) == 0.0
+    assert cosine_similarity([], [1.0]) == 0.0
+
+
+def test_retrieve_falls_through_to_fulltext_when_exact_misses() -> None:
+    client = FakeClient(
+        by_query={
+            "n.name = $name OR n.qualified_name = $name": [],
+            "db.index.fulltext.queryNodes": [
+                {
+                    "labels": ["Function"],
+                    "name": "get_dependant",
+                    "qualified_name": "fastapi.dependencies.utils.get_dependant",
+                    "file_path": "fastapi/dependencies/utils.py",
+                    "path": None,
+                    "line_start": 10,
+                    "line_end": 80,
+                    "score": 4.2,
+                }
+            ],
+        }
+    )
+    result = GraphQueryService(client).retrieve("dependency injection")
+    assert result.result_count == 1
+    hit = result.matches[0]
+    assert hit.tier == "fulltext"
+    assert hit.qualified_name.endswith("get_dependant")
+    assert hit.score == 4.2
+    assert "lucene_query" in client.queries[1][1]
+    assert " OR " in client.queries[1][1]["lucene_query"]
+
+
+def test_retrieve_skips_embeddings_when_flag_is_off() -> None:
+    client = FakeClient(rows=[])
+    result = GraphQueryService(
+        client,
+        embeddings_enabled=False,
+        embedding_provider=_TokenEmbedder(),
+    ).retrieve("dependency injection")
+    assert result.matches == []
+    assert all("vector.queryNodes" not in query for query, _params, _timeout in client.queries)
+
+
+def test_retrieve_ignores_injected_provider_when_flag_defaults_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GQ_EMBEDDINGS_ENABLED", "0")
+    client = FakeClient(rows=[])
+    GraphQueryService(client, embedding_provider=_TokenEmbedder()).retrieve(
+        "dependency injection"
+    )
+    assert all("vector.queryNodes" not in query for query, _params, _timeout in client.queries)
+
+
+def test_retrieve_lexical_tier_uses_vector_index() -> None:
+    client = FakeClient(
+        by_query={
+            "n.name = $name OR n.qualified_name = $name": [],
+            "db.index.fulltext.queryNodes": [],
+            "db.index.vector.queryNodes": [
+                {
+                    "labels": ["Function"],
+                    "name": "get_dependant",
+                    "qualified_name": "fastapi.dependencies.utils.get_dependant",
+                    "file_path": "fastapi/dependencies/utils.py",
+                    "line_start": 1,
+                    "line_end": 20,
+                    "score": 0.91,
+                },
+                {
+                    "labels": ["Function"],
+                    "name": "get_openapi",
+                    "qualified_name": "fastapi.openapi.utils.get_openapi",
+                    "file_path": "fastapi/openapi/utils.py",
+                    "line_start": 1,
+                    "line_end": 20,
+                    "score": 0.11,
+                },
+            ],
+        }
+    )
+    result = GraphQueryService(
+        client,
+        embeddings_enabled=True,
+        embedding_provider=_TokenEmbedder(),
+    ).retrieve("how does dependency injection work")
+    assert result.matches
+    assert result.matches[0].tier == "lexical"
+    assert result.matches[0].name == "get_dependant"
+    vector_params = [
+        params for query, params, _timeout in client.queries if "vector.queryNodes" in query
+    ]
+    assert vector_params
+    assert len(vector_params[0]["query_vector"]) == 2
+
+
+def test_retrieve_request_validation_and_di_queries_return_fastapi_entities() -> None:
+    validation_hit = {
+        "labels": ["Class"],
+        "name": "RequestValidationError",
+        "qualified_name": "fastapi.exceptions.RequestValidationError",
+        "file_path": "fastapi/exceptions.py",
+        "line_start": 10,
+        "line_end": 40,
+        "score": 5.0,
+    }
+    di_hit = {
+        "labels": ["Function"],
+        "name": "get_dependant",
+        "qualified_name": "fastapi.dependencies.utils.get_dependant",
+        "file_path": "fastapi/dependencies/utils.py",
+        "line_start": 10,
+        "line_end": 80,
+        "score": 4.2,
+    }
+    client = FakeClient(
+        by_query={
+            "n.name = $name OR n.qualified_name = $name": [],
+            "db.index.fulltext.queryNodes": [validation_hit, di_hit],
+            "db.index.vector.queryNodes": [],
+        }
+    )
+    service = GraphQueryService(client)
+    validation = service.retrieve("How does FastAPI handle request validation?")
+    di = service.retrieve(
+        "How does dependency injection work and show me examples from the codebase"
+    )
+    assert any(hit.qualified_name.endswith("RequestValidationError") for hit in validation.matches)
+    assert any(hit.file_path == "fastapi/exceptions.py" for hit in validation.matches)
+    assert any(hit.qualified_name.endswith("get_dependant") for hit in di.matches)
+    assert any(hit.file_path == "fastapi/dependencies/utils.py" for hit in di.matches)
+
+
+def test_retrieve_django_and_react_traps_return_no_fastapi_hits() -> None:
+    client = FakeClient(
+        by_query={
+            "n.name = $name OR n.qualified_name = $name": [],
+            "db.index.fulltext.queryNodes": [],
+            "db.index.vector.queryNodes": [],
+        }
+    )
+    service = GraphQueryService(
+        client,
+        embeddings_enabled=True,
+        embedding_provider=_TokenEmbedder(),
+    )
+    django = service.retrieve("How does Django's ORM lazy-load querysets?")
+    react = service.retrieve("Explain React's useEffect cleanup")
+    assert django.matches == []
+    assert react.matches == []
+
+
+def test_retrieve_ranks_package_source_above_tests_for_exact_hits() -> None:
+    test_hit = {
+        "labels": ["Function"],
+        "name": "Depends",
+        "qualified_name": "tests.test_dependency_duplicates.Depends",
+        "file_path": "tests/test_dependency_duplicates.py",
+        "line_start": 10,
+        "line_end": 20,
+        "score": 1.0,
+    }
+    package_hit = {
+        "labels": ["Function"],
+        "name": "Depends",
+        "qualified_name": "fastapi.param_functions.Depends",
+        "file_path": "fastapi/param_functions.py",
+        "line_start": 80,
+        "line_end": 120,
+        "score": 1.0,
+    }
+    client = FakeClient(
+        by_query={
+            "n.name = $name OR n.qualified_name = $name": [test_hit, package_hit],
+            "db.index.fulltext.queryNodes": [],
+        }
+    )
+    result = GraphQueryService(client).retrieve("Depends")
+    assert result.matches
+    assert result.matches[0].file_path == "fastapi/param_functions.py"
+    assert any(hit.file_path.startswith("tests/") for hit in result.matches)
+
+
+def test_retrieve_dependency_injection_prefers_package_source() -> None:
+    client = FakeClient(
+        by_query={
+            "n.name = $name OR n.qualified_name = $name": [
+                {
+                    "labels": ["Function"],
+                    "name": "Depends",
+                    "qualified_name": "tests.test_dependency_duplicates.Depends",
+                    "file_path": "tests/test_dependency_duplicates.py",
+                    "line_start": 14,
+                    "line_end": 25,
+                    "score": 1.0,
+                },
+                {
+                    "labels": ["Function"],
+                    "name": "Depends",
+                    "qualified_name": "fastapi.param_functions.Depends",
+                    "file_path": "fastapi/param_functions.py",
+                    "line_start": 80,
+                    "line_end": 120,
+                    "score": 1.0,
+                },
+                {
+                    "labels": ["Function"],
+                    "name": "get_dependant",
+                    "qualified_name": "fastapi.dependencies.utils.get_dependant",
+                    "file_path": "fastapi/dependencies/utils.py",
+                    "line_start": 370,
+                    "line_end": 430,
+                    "score": 1.0,
+                },
+            ],
+            "db.index.fulltext.queryNodes": [],
+        }
+    )
+    result = GraphQueryService(client).retrieve("Depends")
+    assert result.matches[0].file_path in {
+        "fastapi/dependencies/utils.py",
+        "fastapi/param_functions.py",
+    }
+
+
+class _TokenEmbedder:
+    """Two-d embedder: axis 0 is DI language, axis 1 is OpenAPI language."""
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        vectors: list[list[float]] = []
+        for text in texts:
+            lowered = text.lower()
+            vectors.append(
+                [
+                    1.0 if ("dependency" in lowered or "injection" in lowered) else 0.0,
+                    1.0 if "openapi" in lowered else 0.0,
+                ]
+            )
+        return vectors
+
+
+def test_hashing_embedder_ranks_dependency_injection_above_openapi() -> None:
+    provider = HashingEmbeddingProvider()
+    query = "How does dependency injection work and show me examples from the codebase"
+    di_doc = (
+        "fastapi.dependencies.utils.get_dependant(call)\n"
+        "get_dependant\n"
+        "Build a Dependant from a callable for dependency injection.\n"
+        "def get_dependant(call: Callable[..., Any]) -> Dependant:"
+    )
+    openapi_doc = (
+        "fastapi.openapi.utils.get_openapi(title)\n"
+        "get_openapi\n"
+        "Generate an OpenAPI schema.\n"
+        "def get_openapi(title: str) -> dict[str, Any]:"
+    )
+    django_doc = "django.db.models.query.QuerySet\nlazy-load querysets in the Django ORM."
+    query_tokens = set(tokenize_for_embedding(query))
+    di_tokens = set(tokenize_for_embedding(di_doc))
+    django_tokens = set(tokenize_for_embedding(django_doc))
+    assert query_tokens & di_tokens
+    assert len(query_tokens & di_tokens) > len(query_tokens & django_tokens)
+    vectors = provider.embed([query, di_doc, openapi_doc, django_doc])
+    di_score = cosine_similarity(vectors[0], vectors[1])
+    openapi_score = cosine_similarity(vectors[0], vectors[2])
+    assert di_score > openapi_score
+    assert vectors[0] == provider.embed([query])[0]
+

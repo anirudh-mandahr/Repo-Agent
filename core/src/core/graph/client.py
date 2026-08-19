@@ -10,6 +10,7 @@ from typing import Any, Self
 from neo4j import READ_ACCESS, WRITE_ACCESS, Driver, GraphDatabase, ManagedTransaction, Session
 from pydantic import BaseModel, Field, SecretStr
 
+from core.exceptions import ConfigurationError
 from core.logging import get_logger
 from core.settings import Neo4jSettings
 
@@ -26,13 +27,21 @@ class GraphSettings(BaseModel):
 
     uri: str = Field(default="bolt://neo4j:7687")
     user: str = Field(default="neo4j")
-    password: str = Field(default="changeme123")
+    password: SecretStr
 
     @classmethod
     def from_env(cls) -> GraphSettings:
-        """Load URI, user, and password from the process environment."""
+        """Load URI, user, and password from the process environment.
+
+        Returns:
+            GraphSettings.
+
+        Raises:
+            ConfigurationError: ``NEO4J_PASSWORD`` is missing or empty.
+        """
         env = Neo4jSettings.from_env()
-        return cls(uri=env.uri, user=env.user, password=env.password.get_secret_value())
+        _require_neo4j_password(env.password)
+        return cls(uri=env.uri, user=env.user, password=env.password)
 
 
 def unwind_write(
@@ -40,7 +49,13 @@ def unwind_write(
     query: str,
     rows: Sequence[Mapping[str, Any]],
 ) -> None:
-    """Execute a batched write. `query` must use UNWIND $rows AS row."""
+    """Execute a batched write. `query` must use UNWIND $rows AS row.
+    
+    Args:
+        tx: ManagedTransaction.
+        query: str.
+        rows: Sequence[Mapping[str, Any]].
+    """
     _require_unwind(query)
     tx.run(query, rows=list(rows))
 
@@ -54,34 +69,69 @@ class GraphClient:
     """Thin driver wrapper. Callers decide read vs write; user-facing queries use read-only txs."""
 
     def __init__(self, settings: GraphSettings | Neo4jSettings | None = None) -> None:
-        if settings is None:
-            self._settings: GraphSettings | Neo4jSettings = GraphSettings.from_env()
+        """Create a client from settings or the process environment.
+
+        Args:
+            settings: Bolt settings. Loaded from env when omitted.
+        """
+        if settings is not None:
+            _require_neo4j_password(settings.password)
+            self._settings: GraphSettings | Neo4jSettings | None = settings
         else:
-            self._settings = settings
+            self._settings = None
         self._driver: Driver | None = None
 
     def connect(self) -> Driver:
-        """Open a driver if needed and return it."""
+        """Open a driver if needed and return it.
+        
+        Returns:
+            Driver.
+        """
         if self._driver is None:
-            password = self._settings.password
+            resolved = self._resolved_settings()
+            password = resolved.password
             if isinstance(password, SecretStr):
                 password_value = password.get_secret_value()
             else:
                 password_value = password
             self._driver = GraphDatabase.driver(
-                self._settings.uri,
-                auth=(self._settings.user, password_value),
+                resolved.uri,
+                auth=(resolved.user, password_value),
             )
-            log.info("neo4j.connected", uri=self._settings.uri)
+            log.info("neo4j.connected", uri=resolved.uri)
         return self._driver
 
+    def _resolved_settings(self) -> GraphSettings | Neo4jSettings:
+        if self._settings is None:
+            self._settings = GraphSettings.from_env()
+        return self._settings
+
     def session(self, *, write: bool = False) -> Session:
-        """Open a Neo4j session from the shared driver."""
+        """Open a Neo4j session from the shared driver.
+        
+        Args:
+            write: bool.
+
+        Returns:
+            Session.
+        """
         access = WRITE_ACCESS if write else READ_ACCESS
         return self.connect().session(default_access_mode=access)
 
+    def ping(self) -> None:
+        """Single-attempt Bolt connectivity check for health probes.
+
+        Raises:
+            Exception: The driver could not verify connectivity.
+        """
+        self.connect().verify_connectivity()
+
     def verify_connectivity(self) -> None:
-        """Ping Neo4j, retrying with exponential backoff so callers can wait out startup."""
+        """Ping Neo4j, retrying with exponential backoff so callers can wait out startup.
+        
+        Raises:
+            last_error: See exception message.
+        """
         delay = _VERIFY_INITIAL_DELAY_S
         last_error: BaseException | None = None
         for attempt in range(1, _VERIFY_ATTEMPTS + 1):
@@ -106,7 +156,12 @@ class GraphClient:
         raise last_error
 
     def run_write_batch(self, query: str, rows: Sequence[Mapping[str, Any]]) -> None:
-        """Run an UNWIND write, splitting `rows` into batches of WRITE_BATCH_SIZE."""
+        """Run an UNWIND write, splitting `rows` into batches of WRITE_BATCH_SIZE.
+        
+        Args:
+            query: str.
+            rows: Sequence[Mapping[str, Any]].
+        """
         _require_unwind(query)
         if not rows:
             return
@@ -129,7 +184,16 @@ class GraphClient:
         params: Mapping[str, Any] | None = None,
         timeout_s: float = 10,
     ) -> list[dict[str, Any]]:
-        """Run Cypher in an explicit read-only transaction and return records as dicts."""
+        """Run Cypher in an explicit read-only transaction and return records as dicts.
+        
+        Args:
+            query: str.
+            params: Mapping[str, Any] | None.
+            timeout_s: float.
+
+        Returns:
+            list[dict[str, Any]].
+        """
         parameters = dict(params or {})
         with self.connect().session(default_access_mode=READ_ACCESS) as session:
             tx = session.begin_transaction(timeout=timeout_s)
@@ -143,11 +207,24 @@ class GraphClient:
                 raise
 
     def read(self, query: str, parameters: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
-        """Run a read-only Cypher transaction and return records as dicts."""
+        """Run a read-only Cypher transaction and return records as dicts.
+        
+        Args:
+            query: str.
+            parameters: Mapping[str, Any] | None.
+
+        Returns:
+            list[dict[str, Any]].
+        """
         return self.run_read(query, parameters)
 
     def write_unwind(self, query: str, rows: Sequence[Mapping[str, Any]]) -> None:
-        """Run a batched UNWIND write in a write transaction."""
+        """Run a batched UNWIND write in a write transaction.
+        
+        Args:
+            query: str.
+            rows: Sequence[Mapping[str, Any]].
+        """
         self.run_write_batch(query, rows)
 
     def close(self) -> None:
@@ -157,6 +234,11 @@ class GraphClient:
             self._driver = None
 
     def __enter__(self) -> Self:
+        """Enter  .
+        
+        Returns:
+            Self.
+        """
         self.connect()
         return self
 
@@ -166,7 +248,25 @@ class GraphClient:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        """Exit  .
+        
+        Args:
+            exc_type: type[BaseException] | None.
+            exc: BaseException | None.
+            tb: TracebackType | None.
+        """
         self.close()
+
+
+def _require_neo4j_password(password: SecretStr | str | None) -> None:
+    if isinstance(password, SecretStr):
+        value = password.get_secret_value()
+    else:
+        value = password or ""
+    if not value.strip():
+        raise ConfigurationError(
+            "NEO4J_PASSWORD is required; refusing to connect with an empty password"
+        )
 
 
 def _run_unwind(

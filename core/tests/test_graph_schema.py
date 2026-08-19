@@ -29,8 +29,14 @@ def test_schema_statements_are_idempotent_and_cover_keys() -> None:
     assert "FOR (n:Class) ON (n.name)" in joined
     assert "FOR (n:Method) ON (n.name)" in joined
     assert "FOR (n:Decorator) ON (n.name)" in joined
+    assert "CREATE FULLTEXT INDEX code_search IF NOT EXISTS" in joined
+    assert "n.name, n.qualified_name, n.text" in joined
     assert len(CONSTRAINT_STATEMENTS) == 5
-    assert len(INDEX_STATEMENTS) == 4
+    assert len(INDEX_STATEMENTS) == 8
+    assert "CREATE VECTOR INDEX function_embeddings IF NOT EXISTS" in joined
+    assert "CREATE VECTOR INDEX method_embeddings IF NOT EXISTS" in joined
+    assert "CREATE VECTOR INDEX class_embeddings IF NOT EXISTS" in joined
+    assert "`vector.dimensions`: 256" in joined
     assert "DEFINES" not in joined
     assert "INHERITS_FROM" in RELATIONSHIP_TYPES
     assert "HAS_PARAMETER" in RELATIONSHIP_TYPES

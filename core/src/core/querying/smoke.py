@@ -10,7 +10,11 @@ log = get_logger(__name__)
 
 
 def run_smoke() -> None:
-    """Fail if ``find_entity('get_openapi')`` returns no matches."""
+    """Fail if ``find_entity('get_openapi')`` returns no matches.
+    
+    Raises:
+        RuntimeError: See exception message.
+    """
     configure_logging()
     bind_correlation_id()
     with GraphClient() as client:

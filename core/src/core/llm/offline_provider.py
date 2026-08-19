@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import AsyncIterator
 
 from pydantic import BaseModel
 
@@ -43,16 +44,30 @@ class OfflineProvider:
         purpose: LLMPurpose,
         agent: str = "llm",
         max_tokens: int = 1024,
+        temperature: float | None = None,
     ) -> LLMResult:
+        """Complete.
+        
+        Args:
+            messages: list[Message].
+            response_model: type[BaseModel] | None.
+            purpose: LLMPurpose.
+            agent: str.
+            max_tokens: int.
+            temperature: Unused; present to match ``LLMProvider``.
+
+        Returns:
+            LLMResult.
+        """
         _ = max_tokens
-        _ = agent, purpose
+        _ = agent, purpose, temperature
         prompt = _last_user_content(messages)
         payload_text = (
             _OFFLINE_NOTE
             if response_model is None
             else as_text(_offline_payload(prompt, response_model))
         )
-        usage = estimate_usage(messages, payload_text)
+        usage = estimate_usage(messages, payload_text).model_copy(update={"model": "offline"})
         if response_model is None:
             return LLMResult(text=_OFFLINE_NOTE, usage=usage)
         payload = _offline_payload(prompt, response_model)
@@ -69,8 +84,51 @@ class OfflineProvider:
                 completion_tokens=usage.completion_tokens,
                 total_tokens=usage.total_tokens,
                 estimated=True,
+                model="offline",
+                cached_prompt_tokens=0,
             ),
         )
+
+    async def stream(
+        self,
+        messages: list[Message],
+        response_model: type[BaseModel] | None = None,
+        *,
+        purpose: LLMPurpose,
+        agent: str = "llm",
+        max_tokens: int = 1024,
+        temperature: float | None = None,
+    ) -> AsyncIterator[tuple[str, TokenUsage | None]]:
+        """Yield the offline completion in small chunks.
+
+        Args:
+            messages: Chat messages.
+            response_model: Optional structured schema.
+            purpose: Ledger purpose.
+            agent: Calling agent.
+            max_tokens: Unused; matches ``LLMProvider``.
+            temperature: Unused; matches ``LLMProvider``.
+
+        Yields:
+            ``(delta, usage_or_none)`` pairs.
+        """
+        result = await self.complete(
+            messages,
+            response_model,
+            purpose=purpose,
+            agent=agent,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        text = result.text
+        if not text:
+            yield "", result.usage
+            return
+        step = max(1, min(16, max(len(text) // 4, 1)))
+        for index in range(0, len(text), step):
+            chunk = text[index : index + step]
+            is_last = index + step >= len(text)
+            yield chunk, (result.usage if is_last else None)
 
 
 def _last_user_content(messages: list[Message]) -> str:

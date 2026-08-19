@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -154,9 +155,29 @@ def test_graph_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = GraphSettings.from_env()
     assert settings.uri == "bolt://example:7687"
     assert settings.user == "alice"
-    assert settings.password == "secret"
-    client = GraphClient()
+    assert settings.password.get_secret_value() == "secret"
+    client = GraphClient(settings)
+    assert client._settings is not None
     assert client._settings.uri == "bolt://example:7687"
+
+
+def test_graph_settings_require_password(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from pydantic import ValidationError
+
+    from core.exceptions import ConfigurationError
+
+    monkeypatch.setattr("core.settings._REPO_ROOT", tmp_path)
+    monkeypatch.delenv("NEO4J_PASSWORD", raising=False)
+    monkeypatch.delenv("password", raising=False)
+    with pytest.raises(ConfigurationError, match="NEO4J_PASSWORD"):
+        GraphSettings.from_env()
+    with pytest.raises(ValidationError):
+        GraphSettings(uri="bolt://localhost:7687", user="neo4j")
+    with pytest.raises(ConfigurationError, match="NEO4J_PASSWORD"):
+        GraphClient(GraphSettings(uri="bolt://localhost:7687", user="neo4j", password=""))
+    lazy = GraphClient()
+    with pytest.raises(ConfigurationError, match="NEO4J_PASSWORD"):
+        lazy.connect()
 
 
 def test_run_read_rolls_back_on_error() -> None:

@@ -161,6 +161,14 @@ class MetaRecord(BaseModel):
     updated_at: str
 
 
+class EmbeddingRecord(BaseModel):
+    """Vector plus source text stored on a Class, Function, or Method node."""
+
+    qualified_name: str
+    embedding: list[float]
+    embedding_text: str = ""
+
+
 def _as_dicts(records: Sequence[BaseModel | Mapping[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for record in records:
@@ -188,7 +196,14 @@ def _code_node_cypher(label: str) -> str:
 
 
 def upsert_files(files: Sequence[FileRecord | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``:File`` on ``path`` and SET ``content_hash``."""
+    """MERGE ``:File`` on ``path`` and SET ``content_hash``.
+    
+    Args:
+        files: Sequence[FileRecord | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     query = dedent(
         f"""\
         UNWIND $rows AS row
@@ -200,7 +215,14 @@ def upsert_files(files: Sequence[FileRecord | Mapping[str, Any]]) -> CypherBatch
 
 
 def upsert_meta(rows: Sequence[MetaRecord | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``:Meta`` on ``key`` and SET ``value`` plus ``updated_at``."""
+    """MERGE ``:Meta`` on ``key`` and SET ``value`` plus ``updated_at``.
+    
+    Args:
+        rows: Sequence[MetaRecord | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     query = dedent(
         f"""\
         UNWIND $rows AS row
@@ -213,27 +235,62 @@ def upsert_meta(rows: Sequence[MetaRecord | Mapping[str, Any]]) -> CypherBatch:
 
 
 def upsert_modules(modules: Sequence[ModuleRecord | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``:Module`` on ``qualified_name`` and SET mutable props."""
+    """MERGE ``:Module`` on ``qualified_name`` and SET mutable props.
+    
+    Args:
+        modules: Sequence[ModuleRecord | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     return _code_node_cypher(LABEL_MODULE), _as_dicts(modules)
 
 
 def upsert_classes(classes: Sequence[ClassRecord | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``:Class`` on ``qualified_name`` and SET mutable props."""
+    """MERGE ``:Class`` on ``qualified_name`` and SET mutable props.
+    
+    Args:
+        classes: Sequence[ClassRecord | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     return _code_node_cypher(LABEL_CLASS), _as_dicts(classes)
 
 
 def upsert_functions(functions: Sequence[FunctionRecord | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``:Function`` on ``qualified_name`` and SET mutable props."""
+    """MERGE ``:Function`` on ``qualified_name`` and SET mutable props.
+    
+    Args:
+        functions: Sequence[FunctionRecord | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     return _code_node_cypher(LABEL_FUNCTION), _as_dicts(functions)
 
 
 def upsert_methods(methods: Sequence[MethodRecord | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``:Method`` on ``qualified_name`` and SET mutable props."""
+    """MERGE ``:Method`` on ``qualified_name`` and SET mutable props.
+    
+    Args:
+        methods: Sequence[MethodRecord | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     return _code_node_cypher(LABEL_METHOD), _as_dicts(methods)
 
 
 def upsert_parameters(rows: Sequence[ParameterRecord | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``:Parameter`` nodes and ``HAS_PARAMETER`` edges."""
+    """MERGE ``:Parameter`` nodes and ``HAS_PARAMETER`` edges.
+    
+    Args:
+        rows: Sequence[ParameterRecord | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     query = dedent(
         f"""\
         UNWIND $rows AS row
@@ -255,7 +312,14 @@ def upsert_parameters(rows: Sequence[ParameterRecord | Mapping[str, Any]]) -> Cy
 
 
 def upsert_decorators(rows: Sequence[DecoratorRelRow | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE shared ``:Decorator`` nodes on ``name`` and ``DECORATED_BY`` edges."""
+    """MERGE shared ``:Decorator`` nodes on ``name`` and ``DECORATED_BY`` edges.
+    
+    Args:
+        rows: Sequence[DecoratorRelRow | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     query = dedent(
         f"""\
         UNWIND $rows AS row
@@ -270,7 +334,14 @@ def upsert_decorators(rows: Sequence[DecoratorRelRow | Mapping[str, Any]]) -> Cy
 
 
 def upsert_imports(rows: Sequence[ImportRecord | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``:Import`` nodes and ``(:Module)-[:IMPORTS]->(:Import)``."""
+    """MERGE ``:Import`` nodes and ``(:Module)-[:IMPORTS]->(:Import)``.
+    
+    Args:
+        rows: Sequence[ImportRecord | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     query = dedent(
         f"""\
         UNWIND $rows AS row
@@ -286,7 +357,14 @@ def upsert_imports(rows: Sequence[ImportRecord | Mapping[str, Any]]) -> CypherBa
 
 
 def upsert_docstrings(rows: Sequence[DocstringRecord | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``:Docstring`` nodes and ``DOCUMENTED_BY`` edges."""
+    """MERGE ``:Docstring`` nodes and ``DOCUMENTED_BY`` edges.
+    
+    Args:
+        rows: Sequence[DocstringRecord | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     query = dedent(
         f"""\
         UNWIND $rows AS row
@@ -302,7 +380,14 @@ def upsert_docstrings(rows: Sequence[DocstringRecord | Mapping[str, Any]]) -> Cy
 
 
 def upsert_contains(rows: Sequence[ContainsRow | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``(:File)-[:CONTAINS]->(:Module)``."""
+    """MERGE ``(:File)-[:CONTAINS]->(:Module)``.
+    
+    Args:
+        rows: Sequence[ContainsRow | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     query = dedent(
         f"""\
         UNWIND $rows AS row
@@ -315,17 +400,38 @@ def upsert_contains(rows: Sequence[ContainsRow | Mapping[str, Any]]) -> CypherBa
 
 
 def upsert_contains_classes(rows: Sequence[ContainsEntityRow | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``(:Module)-[:CONTAINS]->(:Class)``."""
+    """MERGE ``(:Module)-[:CONTAINS]->(:Class)``.
+    
+    Args:
+        rows: Sequence[ContainsEntityRow | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     return _contains_cypher(LABEL_MODULE, LABEL_CLASS), _as_dicts(rows)
 
 
 def upsert_contains_functions(rows: Sequence[ContainsEntityRow | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``(:Module)-[:CONTAINS]->(:Function)``."""
+    """MERGE ``(:Module)-[:CONTAINS]->(:Function)``.
+    
+    Args:
+        rows: Sequence[ContainsEntityRow | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     return _contains_cypher(LABEL_MODULE, LABEL_FUNCTION), _as_dicts(rows)
 
 
 def upsert_contains_methods(rows: Sequence[ContainsEntityRow | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``(:Class)-[:CONTAINS]->(:Method)``."""
+    """MERGE ``(:Class)-[:CONTAINS]->(:Method)``.
+    
+    Args:
+        rows: Sequence[ContainsEntityRow | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     return _contains_cypher(LABEL_CLASS, LABEL_METHOD), _as_dicts(rows)
 
 
@@ -341,7 +447,14 @@ def _contains_cypher(parent_label: str, child_label: str) -> str:
 
 
 def upsert_depends_on(rows: Sequence[DependsOnRow | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``(:Module)-[:DEPENDS_ON]->(:Module)``."""
+    """MERGE ``(:Module)-[:DEPENDS_ON]->(:Module)``.
+    
+    Args:
+        rows: Sequence[DependsOnRow | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     query = dedent(
         f"""\
         UNWIND $rows AS row
@@ -354,7 +467,14 @@ def upsert_depends_on(rows: Sequence[DependsOnRow | Mapping[str, Any]]) -> Cyphe
 
 
 def upsert_import_depends_on(rows: Sequence[ImportDependsOnRow | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``(:Import)-[:DEPENDS_ON]->(:Module)`` when the imported module exists."""
+    """MERGE ``(:Import)-[:DEPENDS_ON]->(:Module)`` when the imported module exists.
+    
+    Args:
+        rows: Sequence[ImportDependsOnRow | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     query = dedent(
         f"""\
         UNWIND $rows AS row
@@ -367,7 +487,14 @@ def upsert_import_depends_on(rows: Sequence[ImportDependsOnRow | Mapping[str, An
 
 
 def upsert_calls(rows: Sequence[CallsRow | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``(:Function|:Method)-[:CALLS]->(:Function|:Method)``."""
+    """MERGE ``(:Function|:Method)-[:CALLS]->(:Function|:Method)``.
+    
+    Args:
+        rows: Sequence[CallsRow | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     query = dedent(
         f"""\
         UNWIND $rows AS row
@@ -384,7 +511,14 @@ def upsert_calls(rows: Sequence[CallsRow | Mapping[str, Any]]) -> CypherBatch:
 
 
 def upsert_inherits(rows: Sequence[InheritsRow | Mapping[str, Any]]) -> CypherBatch:
-    """MERGE ``(:Class)-[:INHERITS_FROM]->(:Class)``."""
+    """MERGE ``(:Class)-[:INHERITS_FROM]->(:Class)``.
+    
+    Args:
+        rows: Sequence[InheritsRow | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
     query = dedent(
         f"""\
         UNWIND $rows AS row
@@ -396,8 +530,37 @@ def upsert_inherits(rows: Sequence[InheritsRow | Mapping[str, Any]]) -> CypherBa
     return query, _as_dicts(rows)
 
 
+def upsert_embeddings(rows: Sequence[EmbeddingRecord | Mapping[str, Any]]) -> CypherBatch:
+    """SET ``embedding`` and ``embedding_text`` on Class/Function/Method nodes.
+    
+    Args:
+        rows: Sequence[EmbeddingRecord | Mapping[str, Any]].
+
+    Returns:
+        CypherBatch.
+    """
+    query = dedent(
+        f"""\
+        UNWIND $rows AS row
+        MATCH (n)
+        WHERE n.qualified_name = row.qualified_name
+          AND (n:{LABEL_CLASS} OR n:{LABEL_FUNCTION} OR n:{LABEL_METHOD})
+        SET n.embedding = row.embedding,
+            n.embedding_text = row.embedding_text
+        """
+    ).strip()
+    return query, _as_dicts(rows)
+
+
 def delete_file_subtree(path: str) -> CypherBatch:
-    """DETACH DELETE the ``:File`` and file-owned entities. Shared ``:Decorator`` nodes stay."""
+    """DETACH DELETE the ``:File`` and file-owned entities. Shared ``:Decorator`` nodes stay.
+    
+    Args:
+        path: str.
+
+    Returns:
+        CypherBatch.
+    """
     query = dedent(
         f"""\
         UNWIND $rows AS row

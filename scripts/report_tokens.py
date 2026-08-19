@@ -15,9 +15,9 @@ from fastapi.testclient import TestClient
 from core.gateway import GatewayDependencies
 from core.llm.stub import StubProvider
 from core.orchestration.models import QueryIntent
+from core.orchestration.service import OrchestratorService
 from core.settings import GatewaySettings, OrchestratorSettings
 from gateway.app import create_app
-from orchestrator.service import OrchestratorService
 
 EVAL_PATH = Path(__file__).resolve().parents[1] / "evals" / "routing.jsonl"
 
@@ -48,6 +48,19 @@ class _GraphQueryClient:
         _ = entity_type
         return {"file_path": f"{name}.py", "line_start": 1, "line_end": 20}
 
+    async def get_dependencies(self, name: str) -> object:
+        return {"name": name, "neighbors": []}
+
+    async def get_dependents(self, name: str) -> object:
+        return {"name": name, "neighbors": []}
+
+    async def find_related(self, name: str, relationship_type: str) -> object:
+        return {"name": name, "relationship_type": relationship_type, "neighbors": []}
+
+    async def trace_imports(self, module: str, depth: int = 5) -> object:
+        _ = depth
+        return {"module": module, "paths": []}
+
 
 class _CodeAnalystClient:
     async def get_code_snippet(
@@ -66,6 +79,21 @@ class _CodeAnalystClient:
             "text": f"snippet for {file_path}",
             "error": None,
         }
+
+    async def explain_implementation(self, qualified_name: str) -> object:
+        return {"qualified_name": qualified_name, "explanation": "explained", "error": None}
+
+    async def analyze_function(self, qualified_name: str) -> object:
+        return {"qualified_name": qualified_name, "summary": "analyzed", "error": None}
+
+    async def analyze_class(self, qualified_name: str) -> object:
+        return {"qualified_name": qualified_name, "summary": "analyzed class", "error": None}
+
+    async def compare_implementations(self, name_a: str, name_b: str) -> object:
+        return {"name_a": name_a, "name_b": name_b, "summary": "compared", "error": None}
+
+    async def find_patterns(self, pattern: str) -> object:
+        return {"pattern": pattern, "instances": [], "error": None}
 
 
 class _IndexerClient:

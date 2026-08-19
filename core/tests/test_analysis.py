@@ -20,7 +20,7 @@ from core.analysis.models import (
 from core.analysis.prompts import ANALYZE_FUNCTION_PROMPT, COMPARE_IMPLEMENTATIONS_PROMPT
 from core.analysis.service import CodeAnalystService
 from core.analysis.snippets import PathTraversalError, get_snippet
-from core.exceptions import SchemaValidationError
+from core.exceptions import GraphLookupError, SchemaValidationError
 from core.llm.stub import StubProvider
 from core.querying.patterns import PATTERN_TEMPLATES, SUPPORTED_PATTERNS
 
@@ -76,6 +76,15 @@ class FakeLookup:
         }
         self.pattern_rows: list[dict[str, Any]] = []
 
+    def _rows_for(self, name: object) -> list[dict[str, Any]]:
+        if isinstance(name, str) and name in self.by_name:
+            return list(self.by_name[name])
+        if isinstance(name, str):
+            for rows in self.by_name.values():
+                if rows and rows[0].get("name") == name:
+                    return list(rows)
+        return []
+
     async def __call__(
         self,
         cypher: str,
@@ -83,18 +92,15 @@ class FakeLookup:
     ) -> list[dict[str, Any]]:
         mapping = dict(params or {})
         self.calls.append((cypher, mapping))
-        name = mapping.get("qualified_name")
+        name = mapping.get("name") or mapping.get("qualified_name")
         query = cypher.strip()
+        rows = self._rows_for(name)
         if query == FUNCTION_CONTEXT.strip():
-            if name in {"sample_module.helper", "sample_module.ping"}:
-                return list(self.by_name[str(name)])
-            return []
+            return [row for row in rows if "methods" not in row and "bases" not in row]
         if query == CLASS_CONTEXT.strip():
-            if name == "sample_module.Worker":
-                return list(self.by_name[str(name)])
-            return []
-        if query == ENTITY_LOCATION.strip() and isinstance(name, str) and name in self.by_name:
-            return list(self.by_name[name])
+            return [row for row in rows if "methods" in row or "bases" in row]
+        if query == ENTITY_LOCATION.strip():
+            return rows
         for template in PATTERN_TEMPLATES.values():
             if query == template.strip():
                 return list(self.pattern_rows)
@@ -267,3 +273,90 @@ async def test_get_code_snippet_by_qualified_name() -> None:
     assert snippet.error is None
     assert "def helper" in snippet.text
     assert provider.calls == []
+
+
+async def test_module_snippet_caps_stale_whole_file_span() -> None:
+    lookup = FakeLookup()
+    lookup.by_name["sample_module"] = [
+        {
+            "qualified_name": "sample_module",
+            "labels": ["Module"],
+            "file_path": "sample_module.py",
+            "line_start": 1,
+            "line_end": 4774,
+        }
+    ]
+    snippet = await _service(StubProvider(), lookup).get_code_snippet(
+        qualified_name="sample_module"
+    )
+    assert snippet.error is None
+    assert snippet.line_start == 1
+    assert snippet.line_end == 24
+    assert snippet.text is not None
+    assert "def ping" not in snippet.text
+    assert "Fixture module" in snippet.text
+
+
+async def test_graph_lookup_error_is_not_treated_as_empty_graph() -> None:
+    async def boom(
+        cypher: str, params: Mapping[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        _ = cypher, params
+        raise GraphLookupError(agent="code_analyst", message="mcp execute_query failed")
+
+    service = CodeAnalystService(StubProvider([]), boom, repo_root=FIXTURES)
+    with pytest.raises(GraphLookupError, match="mcp execute_query failed"):
+        await service.analyze_function("sample_module.helper")
+
+
+def test_lookups_match_name_or_qualified_name() -> None:
+    assert "n.name = $name OR n.qualified_name = $name" in FUNCTION_CONTEXT
+    assert "n.name = $name OR n.qualified_name = $name" in CLASS_CONTEXT
+    assert "n.name = $name OR n.qualified_name = $name" in ENTITY_LOCATION
+    assert "$qualified_name" not in FUNCTION_CONTEXT
+    assert "$qualified_name" not in CLASS_CONTEXT
+    assert "$qualified_name" not in ENTITY_LOCATION
+
+
+async def test_analyze_class_and_compare_accept_short_class_names() -> None:
+    provider = StubProvider()
+    provider.enqueue(
+        ClassAnalysis(
+            qualified_name="sample_module.Worker",
+            summary="Worker class",
+            purpose="Does work",
+            methods=["sample_module.Worker.run"],
+            bases=["Base"],
+        ).model_dump(),
+        ImplementationComparison(
+            name_a="Worker",
+            name_b="sample_module.Worker",
+            summary="Same class looked up by short name and FQN.",
+        ).model_dump(),
+    )
+    service = _service(provider)
+    class_result = await service.analyze_class("Worker")
+    assert class_result.error is None
+    assert class_result.summary == "Worker class"
+
+    compared = await service.compare_implementations("Worker", "sample_module.Worker")
+    assert compared.error is None
+    assert "Same class" in compared.summary
+
+
+async def test_get_code_snippet_reresolves_non_file_path() -> None:
+    provider = StubProvider()
+    lookup = FakeLookup()
+    snippet = await _service(provider, lookup).get_code_snippet(
+        file_path="helper",
+        line_start=1,
+        line_end=120,
+    )
+    assert snippet.error is None
+    assert "def helper" in snippet.text
+    assert lookup.calls
+    assert lookup.calls[0][0] == ENTITY_LOCATION
+    assert lookup.calls[0][1] == {"name": "helper"}
+    assert snippet.file_path == "sample_module.py"
+    assert snippet.line_start == 13
+    assert snippet.line_end == 14

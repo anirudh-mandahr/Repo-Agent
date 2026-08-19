@@ -32,11 +32,42 @@ class QueryIntent(BaseModel):
 
 
 class ExecutionPlan(BaseModel):
-    """Agent execution plan with per-phase parallelism."""
+    """One specialist set for a retrieval/analysis round.
+
+    Agents run concurrently. The executor waits internally when ``code_analyst``
+    needs graph coordinates it does not already have. Sequencing is not modeled
+    as multiple plan phases.
+    """
 
     routing_mode: RoutingMode = "llm"
     intent: QueryIntent
-    phases: list[list[AgentName]] = Field(default_factory=list)
+    agents: list[AgentName] = Field(default_factory=list)
+    search_terms: list[str] | None = None
+    iteration: int = 1
+    refinement_reason: str = ""
+
+
+class EvidenceAssessment(BaseModel):
+    """Whether collected specialist evidence can answer the query."""
+
+    sufficient: bool
+    reason: str
+    broader_terms: list[str] = Field(default_factory=list)
+    suggested_agents: list[AgentName] = Field(default_factory=list)
+    suggested_tools: list[str] = Field(default_factory=list)
+
+
+class PlanIteration(BaseModel):
+    """One planning/execution round, emitted as a routing SSE/WebSocket event."""
+
+    iteration: int
+    routing_mode: RoutingMode = "llm"
+    agents: list[AgentName] = Field(default_factory=list)
+    tools_invoked: list[str] = Field(default_factory=list)
+    search_terms: list[str] = Field(default_factory=list)
+    sufficient: bool = False
+    reason: str = ""
+    refinement: str | None = None
 
 
 class RuleRouteResult(BaseModel):
@@ -55,6 +86,7 @@ class AgentOutput(BaseModel):
     output: Any | None = None
     error: str | None = None
     degraded_note: str | None = None
+    tools_invoked: list[str] = Field(default_factory=list)
 
 
 class SourceAttribution(BaseModel):
@@ -65,4 +97,24 @@ class SourceAttribution(BaseModel):
     line_start: int | None = None
     line_end: int | None = None
     quote: str | None = None
+
+
+class PromptTruncation(BaseModel):
+    """Record of synthesis-prompt fields dropped to fit the token budget."""
+
+    original_estimated_tokens: int
+    final_estimated_tokens: int
+    budget: int
+    dropped: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SynthesisResult(BaseModel):
+    """Final synthesizer output plus degradation / budget metadata."""
+
+    answer: str
+    evidence_only: bool = False
+    degraded_reason: str | None = None
+    prompt_truncated: PromptTruncation | None = None
+    estimated_tokens: int = 0
+    prompt_chars: int = 0
 

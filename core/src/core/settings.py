@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, Self, cast
 
-from pydantic import AliasChoices, Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     DotEnvSettingsSource,
@@ -21,6 +21,7 @@ DEFAULT_REPO_URL = "https://github.com/fastapi/fastapi"
 DEFAULT_REPO_ROOT = "/repo"
 DEFAULT_INDEX_REPORT_PATH = "/tmp/index_report.json"
 DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.5"
+DEFAULT_SYNTHESIS_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_GRAPH_QUERY_URL = "http://graph_query:8003/mcp"
 DEFAULT_MEMORY_DB_PATH = "/data/memory.db"
@@ -29,12 +30,15 @@ DEFAULT_MEMORY_TOKEN_BUDGET = 3000
 DEFAULT_MEMORY_RECENT_TURNS = 6
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_SHARED_ENV_FILE = _REPO_ROOT / ".env"
+if TYPE_CHECKING:
+    from core.llm.pricing import ModelRates
+
 _SECRET_ENV_KEYS = {
     "ANTHROPIC_API_KEY",
     "OPENROUTER_API_KEY",
     "NEO4J_PASSWORD",
     "GATEWAY_API_KEY",
+    "MCP_SHARED_SECRET",
 }
 
 
@@ -64,6 +68,11 @@ def _agent_prefix(agent: str) -> str:
 
 class _FilteredDotEnvSettingsSource(DotEnvSettingsSource):
     def __call__(self) -> dict[str, Any]:
+        """Call  .
+        
+        Returns:
+            dict[str, Any].
+        """
         values = super().__call__()
         return {key: value for key, value in values.items() if key not in _SECRET_ENV_KEYS}
 
@@ -82,8 +91,21 @@ class RepoSettings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Settings customise sources.
+        
+        Args:
+            settings_cls: type[BaseSettings].
+            init_settings: PydanticBaseSettingsSource.
+            env_settings: PydanticBaseSettingsSource.
+            dotenv_settings: PydanticBaseSettingsSource.
+            file_secret_settings: PydanticBaseSettingsSource.
+
+        Returns:
+            tuple[PydanticBaseSettingsSource, ...].
+        """
         overlay_file = _REPO_ROOT / f".env.{_app_env()}"
-        shared = _FilteredDotEnvSettingsSource(settings_cls, env_file=_SHARED_ENV_FILE)
+        shared_file = _REPO_ROOT / ".env"
+        shared = _FilteredDotEnvSettingsSource(settings_cls, env_file=shared_file)
         overlay = _FilteredDotEnvSettingsSource(settings_cls, env_file=overlay_file)
         _ = dotenv_settings
         return (init_settings, env_settings, overlay, shared, file_secret_settings)
@@ -97,6 +119,8 @@ class ServiceSettings(RepoSettings):
     model_name: str = DEFAULT_OPENROUTER_MODEL
     token_budget: int = 3000
     cache_ttl_seconds: int = 300
+    breaker_failure_threshold: int = 3
+    breaker_cooldown_s: float = 30.0
 
 
 class AgentRuntimeSettings(ServiceSettings):
@@ -109,6 +133,15 @@ class AgentRuntimeSettings(ServiceSettings):
 
     @classmethod
     def from_env(cls, *, agent: str, default_port: int) -> AgentRuntimeSettings:
+        """From env.
+        
+        Args:
+            agent: str.
+            default_port: int.
+
+        Returns:
+            AgentRuntimeSettings.
+        """
         return cls(  # type: ignore[call-arg]
             agent=agent,
             host=os.environ.get("MCP_HOST", "0.0.0.0"),
@@ -151,13 +184,27 @@ class GatewaySettings(ServiceSettings):
     )
     health_timeout_s: float = 2.0
     answer_chunk_chars: int = 160
+    chat_timeout_s: float = 90.0
     api_key: SecretStr | None = None
+    rate_limit_requests: int = 60
+    rate_limit_window_s: float = 60.0
+    max_message_chars: int = 8000
 
     @classmethod
     def from_env(cls) -> GatewaySettings:
+        """From env.
+        
+        Returns:
+            GatewaySettings.
+        """
         return cls()
 
     def agent_urls(self) -> dict[str, str]:
+        """Agent urls.
+        
+        Returns:
+            dict[str, str].
+        """
         return {
             "orchestrator": self.orchestrator_url,
             "indexer": self.indexer_url,
@@ -179,6 +226,11 @@ class Neo4jSettings(RepoSettings):
 
     @classmethod
     def from_env(cls) -> Neo4jSettings:
+        """From env.
+        
+        Returns:
+            Neo4jSettings.
+        """
         return cls()
 
 
@@ -189,6 +241,18 @@ class LLMSettings(RepoSettings):
         default=DEFAULT_OPENROUTER_MODEL,
         validation_alias=AliasChoices("OPENROUTER_MODEL", "LLM_MODEL", "model"),
     )
+    routing_model: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("ORCH_MODEL_ROUTING", "routing_model"),
+    )
+    synthesis_model: str | None = Field(
+        default=DEFAULT_SYNTHESIS_MODEL,
+        validation_alias=AliasChoices("ORCH_MODEL_SYNTHESIS", "synthesis_model"),
+    )
+    analysis_model: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CA_MODEL_ANALYSIS", "analysis_model"),
+    )
     api_key: SecretStr | None = Field(
         default=None,
         validation_alias=AliasChoices("OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "api_key"),
@@ -197,10 +261,89 @@ class LLMSettings(RepoSettings):
         default=DEFAULT_OPENROUTER_BASE_URL,
         validation_alias=AliasChoices("OPENROUTER_BASE_URL", "base_url"),
     )
+    prompt_usd_per_million: float = Field(
+        default=3.0,
+        validation_alias=AliasChoices("LLM_PROMPT_USD_PER_MILLION", "prompt_usd_per_million"),
+    )
+    completion_usd_per_million: float = Field(
+        default=15.0,
+        validation_alias=AliasChoices(
+            "LLM_COMPLETION_USD_PER_MILLION",
+            "completion_usd_per_million",
+        ),
+    )
+    cached_prompt_usd_per_million: float = Field(
+        default=0.30,
+        validation_alias=AliasChoices(
+            "LLM_CACHED_PROMPT_USD_PER_MILLION",
+            "cached_prompt_usd_per_million",
+        ),
+    )
+    prices_json: str = Field(
+        default="",
+        validation_alias=AliasChoices("LLM_MODEL_PRICES_JSON", "LLM_MODEL_PRICES"),
+    )
+    prompt_cache: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("LLM_PROMPT_CACHE", "prompt_cache"),
+    )
+
+    @field_validator("routing_model", "synthesis_model", "analysis_model", mode="before")
+    @classmethod
+    def _blank_model_override(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @classmethod
     def from_env(cls) -> LLMSettings:
+        """From env.
+
+        Returns:
+            LLMSettings.
+        """
         return cls()
+
+    def resolve_model(self, purpose: str) -> str:
+        """Return the model id for ``purpose``, falling back to ``OPENROUTER_MODEL``.
+
+        Args:
+            purpose: ``routing``, ``synthesis``, ``analysis``, or ``summarization``.
+
+        Returns:
+            OpenRouter model id.
+        """
+        overrides = {
+            "routing": self.routing_model,
+            "synthesis": self.synthesis_model,
+            "analysis": self.analysis_model,
+        }
+        override = overrides.get(purpose)
+        if override:
+            return override
+        return self.model
+
+    def rates_for(self, model: str) -> ModelRates:
+        """Return per-1M rates for ``model``.
+
+        Args:
+            model: OpenRouter model id.
+
+        Returns:
+            Overlay JSON, then the built-in catalog, then global defaults.
+        """
+        from core.llm.pricing import ModelRates, parse_prices_json, resolve_rates
+
+        fallback = ModelRates(
+            prompt_usd_per_million=self.prompt_usd_per_million,
+            completion_usd_per_million=self.completion_usd_per_million,
+            cached_prompt_usd_per_million=self.cached_prompt_usd_per_million,
+        )
+        return resolve_rates(
+            model,
+            overlay=parse_prices_json(self.prices_json),
+            fallback=fallback,
+        )
 
 
 class AnalysisSettings(ServiceSettings):
@@ -219,6 +362,11 @@ class AnalysisSettings(ServiceSettings):
 
     @classmethod
     def from_env(cls) -> AnalysisSettings:
+        """From env.
+        
+        Returns:
+            AnalysisSettings.
+        """
         return cls()
 
 
@@ -236,20 +384,41 @@ class IndexingSettings(ServiceSettings):
         validation_alias=AliasChoices("REPO_ROOT", "repo_root"),
     )
     skip_tests: bool = Field(
-        default=True,
+        default=False,
         validation_alias=AliasChoices("INDEXER_SKIP_TESTS", "INDEX_SKIP_TESTS", "skip_tests"),
     )
     skip_docs: bool = Field(
-        default=True,
+        default=False,
         validation_alias=AliasChoices("INDEXER_SKIP_DOCS", "INDEX_SKIP_DOCS", "skip_docs"),
     )
     report_path: str = Field(
         default=DEFAULT_INDEX_REPORT_PATH,
         validation_alias=AliasChoices("INDEXER_REPORT_PATH", "INDEX_REPORT_PATH", "report_path"),
     )
+    clone_allowed_hosts: str = Field(
+        default="github.com",
+        validation_alias=AliasChoices(
+            "INDEXER_CLONE_ALLOWED_HOSTS",
+            "CLONE_ALLOWED_HOSTS",
+            "clone_allowed_hosts",
+        ),
+    )
+    clone_allowed_schemes: str = Field(
+        default="https",
+        validation_alias=AliasChoices(
+            "INDEXER_CLONE_ALLOWED_SCHEMES",
+            "CLONE_ALLOWED_SCHEMES",
+            "clone_allowed_schemes",
+        ),
+    )
 
     @classmethod
     def from_env(cls) -> IndexingSettings:
+        """From env.
+        
+        Returns:
+            IndexingSettings.
+        """
         return cls()
 
 
@@ -285,6 +454,11 @@ class MemorySettings(ServiceSettings):
 
     @classmethod
     def from_env(cls) -> MemorySettings:
+        """From env.
+        
+        Returns:
+            MemorySettings.
+        """
         return cls()
 
 
@@ -297,12 +471,114 @@ class OrchestratorSettings(ServiceSettings):
     code_analyst_timeout_s: float = 15.0
     indexer_timeout_s: float = 30.0
     synthesis_timeout_s: float = 20.0
+    synthesis_prompt_token_budget: int = 12000
     rules_max_query_tokens: int = 60
     routing_strategy: Literal["rules_first", "llm_first"] = "rules_first"
+    max_plan_iterations: int = 2
+    plan_deadline_s: float = 35.0
+    request_deadline_s: float = 55.0
+    request_token_budget: int = 50_000
+    request_cost_usd_max: float = 0.15
+    request_budgets_enabled: bool = True
+    synthesis_safety_margin_s: float = 2.0
+    synthesis_min_timeout_s: float = 0.0
+    synthesis_reserve_s: float = 20.0
+    prompt_truncation_order: Literal["snippets_then_lists", "lists_then_snippets"] = (
+        "snippets_then_lists"
+    )
+    breaker_graph_query_failure_threshold: int | None = None
+    breaker_graph_query_cooldown_s: float | None = None
+    breaker_code_analyst_failure_threshold: int | None = None
+    breaker_code_analyst_cooldown_s: float | None = None
+    breaker_indexer_failure_threshold: int | None = None
+    breaker_indexer_cooldown_s: float | None = None
+    breaker_memory_failure_threshold: int | None = None
+    breaker_memory_cooldown_s: float | None = None
+
+    @model_validator(mode="after")
+    def _plan_plus_synthesis_reserve_fits_request(self) -> Self:
+        """Fail loudly when the plan phase can legally starve synthesis.
+
+        Returns:
+            This settings instance.
+
+        Raises:
+            ValueError: When ``plan_deadline_s + synthesis_reserve_s`` exceeds
+                ``request_deadline_s``.
+        """
+        allocated = self.plan_deadline_s + self.synthesis_reserve_s
+        if allocated > self.request_deadline_s:
+            raise ValueError(
+                "ORCH_PLAN_DEADLINE_S + ORCH_SYNTHESIS_RESERVE_S must be "
+                f"<= ORCH_REQUEST_DEADLINE_S ({self.plan_deadline_s} + "
+                f"{self.synthesis_reserve_s} > {self.request_deadline_s})"
+            )
+        self._assert_reserve_covers_synthesis_p95()
+        return self
+
+    def _assert_reserve_covers_synthesis_p95(self) -> None:
+        """Fail when a full plan leaves less synthesis time than the bake-off p95.
+
+        Skipped when request budgets are disabled or the synthesis reserve is
+        zero (test clocks). Uses the resolved ``ORCH_MODEL_SYNTHESIS`` model.
+        """
+        if not self.request_budgets_enabled or self.synthesis_reserve_s <= 0:
+            return
+        from core.llm.pricing import measured_synthesis_p95_s
+
+        model = LLMSettings().resolve_model("synthesis")
+        p95 = measured_synthesis_p95_s(model)
+        if p95 is None:
+            return
+        usable = self.synthesis_reserve_s - self.synthesis_safety_margin_s
+        if usable < p95:
+            raise ValueError(
+                "ORCH_SYNTHESIS_RESERVE_S - ORCH_SYNTHESIS_SAFETY_MARGIN_S must be "
+                f">= measured synthesis p95 for {model} ({self.synthesis_reserve_s} - "
+                f"{self.synthesis_safety_margin_s} < {p95:.3f}s)"
+            )
 
     @classmethod
     def from_env(cls) -> OrchestratorSettings:
+        """From env.
+
+        Returns:
+            OrchestratorSettings.
+        """
         return cls()
+
+    def breaker_for(self, agent: str) -> tuple[int, float]:
+        """Return ``(failure_threshold, cooldown_s)`` for ``agent``.
+
+        Args:
+            agent: Upstream specialist name.
+
+        Returns:
+            Per-agent circuit breaker thresholds, falling back to the shared defaults.
+        """
+        overrides: dict[str, tuple[int | None, float | None]] = {
+            "graph_query": (
+                self.breaker_graph_query_failure_threshold,
+                self.breaker_graph_query_cooldown_s,
+            ),
+            "code_analyst": (
+                self.breaker_code_analyst_failure_threshold,
+                self.breaker_code_analyst_cooldown_s,
+            ),
+            "indexer": (
+                self.breaker_indexer_failure_threshold,
+                self.breaker_indexer_cooldown_s,
+            ),
+            "memory": (
+                self.breaker_memory_failure_threshold,
+                self.breaker_memory_cooldown_s,
+            ),
+        }
+        threshold, cooldown = overrides.get(agent, (None, None))
+        return (
+            threshold if threshold is not None else self.breaker_failure_threshold,
+            cooldown if cooldown is not None else self.breaker_cooldown_s,
+        )
 
 
 class GraphQuerySettings(ServiceSettings):
@@ -310,8 +586,26 @@ class GraphQuerySettings(ServiceSettings):
 
     model_config = SettingsConfigDict(env_prefix="GQ_", extra="ignore", case_sensitive=False)
 
+    embeddings_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable the hash-based lexical fallback (third find_entity tier). "
+            "Default off. Injecting an EmbeddingProvider does not turn this on."
+        ),
+        validation_alias=AliasChoices(
+            "GQ_EMBEDDINGS_ENABLED",
+            "EMBEDDINGS_ENABLED",
+            "embeddings_enabled",
+        ),
+    )
+
     @classmethod
     def from_env(cls) -> GraphQuerySettings:
+        """From env.
+        
+        Returns:
+            GraphQuerySettings.
+        """
         return cls()
 
 

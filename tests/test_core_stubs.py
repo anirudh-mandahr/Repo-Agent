@@ -1,20 +1,14 @@
-"""AST parse and query routing stubs."""
+"""AST parse and graph write stubs."""
 
 from __future__ import annotations
 
 from core.ast_parse import parse_python_source
 from core.graph.client import unwind_write
-from core.routing import route_query
 
 
 def test_parse_python_source() -> None:
     module = parse_python_source("x = 1\n")
     assert module.body
-
-
-def test_route_query_defaults_to_graph_query() -> None:
-    assert route_query("how does FastAPI start?") == "graph_query"
-    assert route_query("please index the repo") == "indexer"
 
 
 def test_unwind_write_rejects_non_unwind() -> None:

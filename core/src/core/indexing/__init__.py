@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from core.indexing.cloner import clone_repo, default_repo_url
+from core.indexing.cloner import clone_repo, default_repo_url, validate_clone_url
 from core.indexing.indexer import (
     IndexReport,
     IndexStatus,
@@ -32,7 +32,17 @@ from core.logging import bind_correlation_id, configure_logging, get_logger
 
 
 def trigger_index(*, repo_root: str = "/repo") -> IndexReport:
-    """Clone the configured repo and index it. Used by ``make index``."""
+    """Clone the configured repo and index it. Used by ``make index``.
+    
+    Args:
+        repo_root: str.
+
+    Returns:
+        IndexReport.
+
+    Raises:
+        RuntimeError: See exception message.
+    """
     configure_logging()
     bind_correlation_id()
     log = get_logger(__name__)
@@ -66,4 +76,5 @@ __all__ = [
     "run_index_file",
     "save_report",
     "trigger_index",
+    "validate_clone_url",
 ]

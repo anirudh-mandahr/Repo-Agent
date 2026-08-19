@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import asyncio
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,12 +34,28 @@ class RecordedCall:
 class StubProvider:
     """Test double. Never calls a real API. Used by all tests."""
 
-    def __init__(self, responses: Sequence[Any] | None = None) -> None:
+    def __init__(
+        self,
+        responses: Sequence[Any] | None = None,
+        *,
+        stream_chunk_delay_s: float = 0.0,
+    ) -> None:
+        """Queue canned completions for tests.
+
+        Args:
+            responses: FIFO of text, mappings, or models to return.
+            stream_chunk_delay_s: Optional delay between streamed chunks.
+        """
         self.calls: list[RecordedCall] = []
         self._queue: list[Any] = list(responses or [])
+        self._stream_chunk_delay_s = stream_chunk_delay_s
 
     def enqueue(self, *responses: Any) -> None:
-        """Append canned responses to the FIFO queue."""
+        """Append canned responses to the FIFO queue.
+        
+        Args:
+            responses: Any.
+        """
         self._queue.extend(responses)
 
     async def complete(
@@ -49,10 +66,27 @@ class StubProvider:
         purpose: LLMPurpose,
         agent: str = "llm",
         max_tokens: int = 1024,
+        temperature: float | None = None,
     ) -> LLMResult:
-        """Pop the next canned response. Validate and retry once when modeled."""
+        """Pop the next canned response. Validate and retry once when modeled.
+        
+        Args:
+            messages: list[Message].
+            response_model: type[BaseModel] | None.
+            purpose: LLMPurpose.
+            agent: str.
+            max_tokens: int.
+            temperature: Unused; present to match ``LLMProvider``.
+
+        Returns:
+            LLMResult.
+
+        Raises:
+            SchemaValidationError: See exception message.
+        """
         _ = max_tokens
         _ = agent
+        _ = temperature
 
         async def invoke(attempt_messages: list[Message]) -> tuple[Any, TokenUsage]:
             self.calls.append(
@@ -79,6 +113,8 @@ class StubProvider:
                 completion_tokens=20,
                 total_tokens=120,
                 estimated=False,
+                model="stub",
+                cached_prompt_tokens=0,
             )
 
         return await complete_with_schema_retry(
@@ -88,3 +124,46 @@ class StubProvider:
             purpose=purpose,
             agent=agent,
         )
+
+    async def stream(
+        self,
+        messages: list[Message],
+        response_model: type[BaseModel] | None = None,
+        *,
+        purpose: LLMPurpose,
+        agent: str = "llm",
+        max_tokens: int = 1024,
+        temperature: float | None = None,
+    ) -> AsyncIterator[tuple[str, TokenUsage | None]]:
+        """Yield canned text in small chunks, then the usage on the last delta.
+
+        Args:
+            messages: Chat messages.
+            response_model: Optional structured schema (collected via complete).
+            purpose: Ledger purpose.
+            agent: Calling agent.
+            max_tokens: Unused; matches ``LLMProvider``.
+            temperature: Unused; matches ``LLMProvider``.
+
+        Yields:
+            ``(delta, usage_or_none)`` pairs.
+        """
+        result = await self.complete(
+            messages,
+            response_model,
+            purpose=purpose,
+            agent=agent,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        text = result.text
+        if not text:
+            yield "", result.usage
+            return
+        step = max(1, min(16, max(len(text) // 4, 1)))
+        for index in range(0, len(text), step):
+            if self._stream_chunk_delay_s > 0:
+                await asyncio.sleep(self._stream_chunk_delay_s)
+            chunk = text[index : index + step]
+            is_last = index + step >= len(text)
+            yield chunk, (result.usage if is_last else None)

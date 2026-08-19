@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Multi-stage uv image parameterized by PACKAGE (workspace member to run).
-FROM ghcr.io/astral-sh/uv:python3.12-trixie-slim AS builder
+FROM ghcr.io/astral-sh/uv:python3.12-trixie-slim@sha256:4677e08839853fe91c523b593f822ec1e87c7b91ba4c6b30929016b2e0933cd5 AS builder
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -31,10 +31,12 @@ COPY agents /app/agents
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-editable --package "${PACKAGE}"
 
-FROM python:3.12-slim-trixie
+FROM python:3.12-slim-trixie@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a
 
 RUN groupadd --system --gid 999 app \
-    && useradd --system --gid 999 --uid 999 --create-home app
+    && useradd --system --gid 999 --uid 999 --create-home app \
+    && mkdir -p /repo /data \
+    && chown app:app /repo /data
 
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
 

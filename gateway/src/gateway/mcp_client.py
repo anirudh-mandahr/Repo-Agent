@@ -2,76 +2,106 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
 from collections.abc import Mapping
-from contextlib import asynccontextmanager
-from typing import Any
+from time import monotonic
+from typing import Any, Literal
 
-from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
-from mcp.types import CallToolResult, TextContent
-
-from core.exceptions import AgentUnavailableError
+from core.exceptions import AgentUnavailableError, CircuitBreakerOpenError
 from core.gateway import OrchestratorGatewayClient
 from core.health import HealthStatus
 from core.logging import get_logger
 from core.memory import ConversationContext
 from core.orchestration.models import ExecutionPlan, QueryIntent
+from core.resilience.circuit_breaker import CircuitBreakerRegistry
+from core.resilience.session_pool import AgentSessionPool
 from core.settings import GatewaySettings
 
 log = get_logger(__name__)
 
 
-def _parse_health(agent: str, result: CallToolResult) -> HealthStatus:
-    structured = result.structuredContent
-    if isinstance(structured, dict):
-        payload = structured.get("result", structured)
-        if isinstance(payload, dict):
+def build_gateway_pool(settings: GatewaySettings) -> AgentSessionPool:
+    """Build the process-wide MCP session pool for the gateway.
+
+    Args:
+        settings: Gateway settings with agent URLs and breaker knobs.
+
+    Returns:
+        Lazy session pool covering all five agents.
+    """
+    breakers = CircuitBreakerRegistry(
+        default_failure_threshold=settings.breaker_failure_threshold,
+        default_cooldown_s=settings.breaker_cooldown_s,
+        clock=monotonic,
+    )
+    return AgentSessionPool(settings.agent_urls(), breakers=breakers, clock=monotonic)
+
+
+def _parse_health(agent: str, payload: Any) -> HealthStatus:
+    if isinstance(payload, HealthStatus):
+        return payload
+    if isinstance(payload, dict):
+        inner = payload.get("result", payload) if "result" in payload else payload
+        if isinstance(inner, dict):
             try:
-                status = HealthStatus.model_validate(payload)
-                if result.isError:
-                    return status.model_copy(update={"status": "error"})
-                return status
+                return HealthStatus.model_validate(inner)
             except ValueError:
-                pass
-
-    if result.content:
-        block = result.content[0]
-        text = block.text if isinstance(block, TextContent) else str(block)
-        try:
-            parsed = json.loads(text)
-            if isinstance(parsed, dict):
-                return HealthStatus.model_validate(parsed)
-        except (json.JSONDecodeError, ValueError):
-            return HealthStatus(
-                status="error" if result.isError else "ok",
-                agent=agent,
-                detail=text,
-            )
-
-    if result.isError:
-        return HealthStatus(status="error", agent=agent, detail="health tool failed")
-    return HealthStatus(status="ok", agent=agent)
+                return HealthStatus(
+                    status="error",
+                    agent=agent,
+                    detail=str(inner),
+                )
+    if payload is None:
+        return HealthStatus(status="ok", agent=agent)
+    return HealthStatus(status="ok", agent=agent, detail=str(payload))
 
 
-async def call_agent_health(agent: str, url: str) -> HealthStatus:
-    """Open an MCP client session and invoke the agent's health tool."""
+async def call_agent_health(
+    agent: str,
+    url: str,
+    *,
+    pool: AgentSessionPool | None = None,
+    timeout_s: float = 2.0,
+) -> HealthStatus:
+    """Invoke the agent's health tool, reusing a pooled session when provided."""
     try:
-        async with _session(url) as session:
+        if pool is not None:
+            payload = await pool.call(
+                agent,
+                "health",
+                {},
+                correlation_id="health",
+                timeout_s=timeout_s,
+                retry_count=0,
+            )
+            return _parse_health(agent, payload)
+        from core.mcp.client import open_streamable_http_session, parse_call_tool_result
+
+        session = await open_streamable_http_session(url)
+        try:
             result = await session.call_tool("health", arguments={})
-        return _parse_health(agent, result)
+            payload = parse_call_tool_result(
+                result,
+                agent=agent,
+                tool="health",
+                correlation_id="health",
+            )
+            return _parse_health(agent, payload)
+        finally:
+            await session.aclose()
+    except CircuitBreakerOpenError as exc:
+        log.error("mcp.health_breaker_open", agent=agent, error=str(exc))
+        snapshot = None
+        if pool is not None:
+            snapshot = pool.breakers.get(agent).snapshot()
+        return HealthStatus(
+            status="error",
+            agent=agent,
+            detail="circuit breaker open",
+            circuit_breakers={agent: snapshot} if snapshot is not None else None,
+        )
     except Exception as exc:
         log.error("mcp.health_failed", agent=agent, url=url, error=str(exc))
         return HealthStatus(status="error", agent=agent, detail=str(exc))
-
-
-@asynccontextmanager
-async def _session(url: str) -> Any:
-    async with streamable_http_client(url) as (read, write, _session_id):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            yield session
 
 
 async def call_tool_json(
@@ -81,53 +111,53 @@ async def call_tool_json(
     *,
     correlation_id: str,
     timeout_s: float,
+    pool: AgentSessionPool | None = None,
+    agent: str | None = None,
 ) -> Any:
     """Call one MCP tool and return JSON-ish structured content."""
+    if pool is not None and agent is not None:
+        return await pool.call(
+            agent,
+            tool,
+            arguments,
+            correlation_id=correlation_id,
+            timeout_s=timeout_s,
+            retry_count=0,
+        )
+    from core.mcp.client import open_streamable_http_session, parse_call_tool_result
+
     try:
-        async with _session(url) as session:
-            result = await asyncio.wait_for(
-                session.call_tool(
-                    tool,
-                    arguments=dict(arguments or {}),
-                    meta={"correlation_id": correlation_id},
-                ),
-                timeout=timeout_s,
+        session = await open_streamable_http_session(url)
+        try:
+            result = await session.call_tool(
+                tool,
+                arguments=dict(arguments or {}),
+                meta={"correlation_id": correlation_id},
             )
+        finally:
+            await session.aclose()
     except Exception as exc:
         raise AgentUnavailableError(
             agent=tool,
             correlation_id=correlation_id,
             message=str(exc),
         ) from exc
-
-    if result.isError:
-        raise AgentUnavailableError(
-            agent=tool,
-            correlation_id=correlation_id,
-            message=str(result.content),
-            data=result.structuredContent,
-        )
-
-    if isinstance(result.structuredContent, dict):
-        payload = result.structuredContent
-        return payload.get("result", payload)
-
-    if result.content:
-        block = result.content[0]
-        text = block.text if isinstance(block, TextContent) else str(block)
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return text
-    return None
+    return parse_call_tool_result(
+        result,
+        agent=agent or tool,
+        tool=tool,
+        correlation_id=correlation_id,
+    )
 
 
 class GatewayOrchestratorClient(OrchestratorGatewayClient):
     """Gateway-side adapter around orchestrator MCP tools."""
 
-    def __init__(self, settings: GatewaySettings) -> None:
+    def __init__(self, settings: GatewaySettings, pool: AgentSessionPool) -> None:
         self._url = settings.orchestrator_url
         self._timeout_s = settings.request_timeout_s
+        self._chat_timeout_s = settings.chat_timeout_s
+        self._pool = pool
 
     async def handle_query(
         self,
@@ -136,12 +166,12 @@ class GatewayOrchestratorClient(OrchestratorGatewayClient):
         *,
         correlation_id: str,
     ) -> dict[str, Any]:
-        payload = await call_tool_json(
-            self._url,
+        payload = await self._pool.call(
+            "orchestrator",
             "handle_query",
             {"query": query, "session_id": session_id},
             correlation_id=correlation_id,
-            timeout_s=self._timeout_s,
+            timeout_s=self._chat_timeout_s,
         )
         if not isinstance(payload, dict):
             return {"answer": str(payload), "metadata": {}}
@@ -154,8 +184,8 @@ class GatewayOrchestratorClient(OrchestratorGatewayClient):
         *,
         correlation_id: str,
     ) -> ConversationContext:
-        payload = await call_tool_json(
-            self._url,
+        payload = await self._pool.call(
+            "orchestrator",
             "get_conversation_context",
             {"session_id": session_id, "token_budget": token_budget},
             correlation_id=correlation_id,
@@ -170,8 +200,8 @@ class GatewayOrchestratorClient(OrchestratorGatewayClient):
         *,
         correlation_id: str,
     ) -> QueryIntent:
-        payload = await call_tool_json(
-            self._url,
+        payload = await self._pool.call(
+            "orchestrator",
             "analyze_query",
             {"query": query, "context": context.model_dump(mode="json")},
             correlation_id=correlation_id,
@@ -185,8 +215,8 @@ class GatewayOrchestratorClient(OrchestratorGatewayClient):
         *,
         correlation_id: str,
     ) -> ExecutionPlan:
-        payload = await call_tool_json(
-            self._url,
+        payload = await self._pool.call(
+            "orchestrator",
             "route_to_agents",
             {"intent": intent.model_dump(mode="json")},
             correlation_id=correlation_id,
@@ -202,8 +232,8 @@ class GatewayOrchestratorClient(OrchestratorGatewayClient):
         *,
         correlation_id: str,
     ) -> str:
-        payload = await call_tool_json(
-            self._url,
+        payload = await self._pool.call(
+            "orchestrator",
             "synthesize_response",
             {
                 "query": query,
@@ -219,21 +249,21 @@ class GatewayOrchestratorClient(OrchestratorGatewayClient):
 class GatewaySpecialistClients:
     """Gateway-side adapter around the specialist MCP tools."""
 
-    def __init__(self, settings: GatewaySettings) -> None:
+    def __init__(self, settings: GatewaySettings, pool: AgentSessionPool) -> None:
         self._settings = settings
-        self.graph_query = _GraphQueryGatewayClient(settings)
-        self.code_analyst = _CodeAnalystGatewayClient(settings)
-        self.indexer = _IndexerGatewayClient(settings)
+        self.graph_query = _GraphQueryGatewayClient(settings, pool)
+        self.code_analyst = _CodeAnalystGatewayClient(settings, pool)
+        self.indexer = _IndexerGatewayClient(settings, pool)
 
 
 class _GraphQueryGatewayClient:
-    def __init__(self, settings: GatewaySettings) -> None:
-        self._url = settings.graph_query_url
+    def __init__(self, settings: GatewaySettings, pool: AgentSessionPool) -> None:
         self._timeout_s = settings.request_timeout_s
+        self._pool = pool
 
     async def get_statistics(self, *, correlation_id: str) -> Any:
-        return await call_tool_json(
-            self._url,
+        return await self._pool.call(
+            "graph_query",
             "get_statistics",
             {},
             correlation_id=correlation_id,
@@ -247,8 +277,8 @@ class _GraphQueryGatewayClient:
         *,
         correlation_id: str,
     ) -> Any:
-        return await call_tool_json(
-            self._url,
+        return await self._pool.call(
+            "graph_query",
             "find_entity",
             {"name": name, "entity_type": entity_type},
             correlation_id=correlation_id,
@@ -257,9 +287,9 @@ class _GraphQueryGatewayClient:
 
 
 class _CodeAnalystGatewayClient:
-    def __init__(self, settings: GatewaySettings) -> None:
-        self._url = settings.code_analyst_url
+    def __init__(self, settings: GatewaySettings, pool: AgentSessionPool) -> None:
         self._timeout_s = settings.request_timeout_s
+        self._pool = pool
 
     async def get_code_snippet(
         self,
@@ -270,8 +300,8 @@ class _CodeAnalystGatewayClient:
         line_end: int | None = None,
         correlation_id: str,
     ) -> Any:
-        return await call_tool_json(
-            self._url,
+        return await self._pool.call(
+            "code_analyst",
             "get_code_snippet",
             {
                 "qualified_name": qualified_name,
@@ -285,22 +315,28 @@ class _CodeAnalystGatewayClient:
 
 
 class _IndexerGatewayClient:
-    def __init__(self, settings: GatewaySettings) -> None:
-        self._url = settings.indexer_url
+    def __init__(self, settings: GatewaySettings, pool: AgentSessionPool) -> None:
         self._timeout_s = settings.request_timeout_s
+        self._pool = pool
 
-    async def index_repository(self, repo_url: str | None = None, *, correlation_id: str) -> Any:
-        return await call_tool_json(
-            self._url,
+    async def index_repository(
+        self,
+        repo_url: str | None = None,
+        *,
+        mode: Literal["full", "incremental"] = "incremental",
+        correlation_id: str,
+    ) -> Any:
+        return await self._pool.call(
+            "indexer",
             "index_repository",
-            {"repo_url": repo_url},
+            {"repo_url": repo_url, "mode": mode},
             correlation_id=correlation_id,
             timeout_s=self._timeout_s,
         )
 
     async def index_file(self, path: str, *, correlation_id: str) -> Any:
-        return await call_tool_json(
-            self._url,
+        return await self._pool.call(
+            "indexer",
             "index_file",
             {"path": path},
             correlation_id=correlation_id,

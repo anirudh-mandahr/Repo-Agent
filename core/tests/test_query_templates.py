@@ -10,11 +10,14 @@ from typing import Any
 from core.querying import patterns, templates
 from core.querying.service import GraphQueryService
 from core.querying.templates import (
+    DEFAULT_NEIGHBOR_BRANCH_LIMIT,
     FIND_ENTITY,
+    FIND_FULLTEXT,
     FIND_RELATED,
     GET_DEPENDENCIES,
     GET_DEPENDENTS,
     TRACE_IMPORTS,
+    VECTOR_SEARCH,
 )
 
 
@@ -25,6 +28,7 @@ class CapturingClient:
         self.query: str = ""
         self.params: dict[str, Any] = {}
         self.timeout_s: float | None = None
+        self.queries: list[tuple[str, dict[str, Any]]] = []
 
     def run_read(
         self,
@@ -35,6 +39,7 @@ class CapturingClient:
         self.query = query
         self.params = dict(params or {})
         self.timeout_s = timeout_s
+        self.queries.append((query, dict(params or {})))
         return []
 
 
@@ -55,43 +60,75 @@ def test_patterns_module_has_no_fstrings() -> None:
 def test_templates_use_parameter_placeholders() -> None:
     assert "$name" in FIND_ENTITY
     assert "$entity_type" in FIND_ENTITY
+    assert "$index_name" in FIND_FULLTEXT
+    assert "$lucene_query" in FIND_FULLTEXT
+    assert "$top_k" in FIND_FULLTEXT
+    assert "$query_vector" in VECTOR_SEARCH
+    assert "$min_score" in VECTOR_SEARCH
+    assert "$index_name" in VECTOR_SEARCH
     assert "$name" in GET_DEPENDENCIES
     assert "$name" in GET_DEPENDENTS
+    assert "$branch_limit" in GET_DEPENDENCIES
+    assert "$branch_limit" in GET_DEPENDENTS
+    assert GET_DEPENDENCIES.count("LIMIT $branch_limit") == 3
+    assert GET_DEPENDENTS.count("LIMIT $branch_limit") == 3
     assert "$module" in TRACE_IMPORTS
     assert "$depth" in TRACE_IMPORTS
     assert "$relationship_type" in FIND_RELATED
     assert "IMPORTS|DEPENDS_ON|CALLS" in GET_DEPENDENCIES
     assert "IMPORTS|DEPENDS_ON|CALLS" in GET_DEPENDENTS
+    assert "Class->Module" in GET_DEPENDENCIES
+    assert "Class->Method" in GET_DEPENDENCIES
+    assert "Class->Module" in GET_DEPENDENTS
+    assert "Class->Method" in GET_DEPENDENTS
+    assert "Class->Module" in TRACE_IMPORTS
 
 
 def test_find_entity_passes_name_as_parameter() -> None:
     client = CapturingClient()
     GraphQueryService(client).find_entity("get_openapi")
-    assert "get_openapi" not in client.query
-    assert client.params == {"name": "get_openapi", "entity_type": None}
-    assert "$name" in client.query
+    exact_query, exact_params = client.queries[0]
+    assert "get_openapi" not in exact_query
+    assert exact_params == {"name": "get_openapi", "entity_type": None}
+    assert "$name" in exact_query
+    fulltext_query, fulltext_params = client.queries[1]
+    assert "get_openapi" not in fulltext_query
+    assert fulltext_params["lucene_query"]
+    assert "$lucene_query" in fulltext_query
+    assert "$index_name" in fulltext_query
 
 
 def test_find_entity_passes_entity_type_as_parameter() -> None:
     client = CapturingClient()
     GraphQueryService(client).find_entity("FastAPI", entity_type="Class")
-    assert "FastAPI" not in client.query
-    assert client.params == {"name": "FastAPI", "entity_type": "Class"}
+    assert "FastAPI" not in client.queries[0][0]
+    assert client.queries[0][1] == {"name": "FastAPI", "entity_type": "Class"}
+    assert client.queries[1][1]["entity_type"] == "Class"
 
 
 def test_get_dependencies_passes_name_as_parameter() -> None:
     client = CapturingClient()
     GraphQueryService(client).get_dependencies("fastapi.applications")
-    assert "fastapi.applications" not in client.query
-    assert client.params == {"name": "fastapi.applications"}
+    limited = next(
+        params
+        for query, params in client.queries
+        if "$branch_limit" in query or "branch_limit" in params
+    )
+    assert limited["name"] == "fastapi.applications"
+    assert limited["branch_limit"] == DEFAULT_NEIGHBOR_BRANCH_LIMIT
+    for query, _params in client.queries:
+        assert "fastapi.applications" not in query
 
 
 def test_get_dependents_passes_name_as_parameter() -> None:
     client = CapturingClient()
     qn = "fastapi.openapi.utils.get_openapi"
     GraphQueryService(client).get_dependents(qn)
-    assert qn not in client.query
-    assert client.params == {"name": qn}
+    limited = next(params for query, params in client.queries if "branch_limit" in params)
+    assert limited["name"] == qn
+    assert limited["branch_limit"] == DEFAULT_NEIGHBOR_BRANCH_LIMIT
+    for query, _params in client.queries:
+        assert qn not in query
 
 
 def test_trace_imports_passes_module_as_parameter() -> None:

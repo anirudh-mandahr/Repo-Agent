@@ -118,11 +118,44 @@ CONSTRAINT_STATEMENTS: tuple[str, ...] = (
     ("CREATE CONSTRAINT file_path IF NOT EXISTS FOR (n:File) REQUIRE n.path IS UNIQUE"),
 )
 
-INDEX_STATEMENTS: tuple[str, ...] = (
+NAME_INDEX_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX function_name IF NOT EXISTS FOR (n:Function) ON (n.name)",
     "CREATE INDEX class_name IF NOT EXISTS FOR (n:Class) ON (n.name)",
     "CREATE INDEX method_name IF NOT EXISTS FOR (n:Method) ON (n.name)",
     "CREATE INDEX decorator_name IF NOT EXISTS FOR (n:Decorator) ON (n.name)",
+)
+
+FULLTEXT_INDEX_NAME = "code_search"
+VECTOR_INDEX_DIMENSIONS = 256
+VECTOR_SIMILARITY_FUNCTION = "cosine"
+VECTOR_INDEX_NAMES: dict[str, str] = {
+    LABEL_FUNCTION: "function_embeddings",
+    LABEL_METHOD: "method_embeddings",
+    LABEL_CLASS: "class_embeddings",
+}
+
+FULLTEXT_INDEX_STATEMENTS: tuple[str, ...] = (
+    (
+        "CREATE FULLTEXT INDEX code_search IF NOT EXISTS "
+        "FOR (n:Module|Class|Function|Method|Docstring) "
+        "ON EACH [n.name, n.qualified_name, n.text]"
+    ),
+)
+
+VECTOR_INDEX_STATEMENTS: tuple[str, ...] = tuple(
+    (
+        f"CREATE VECTOR INDEX {index_name} IF NOT EXISTS "
+        f"FOR (n:{label}) ON (n.embedding) "
+        "OPTIONS {indexConfig: {"
+        f"`vector.dimensions`: {VECTOR_INDEX_DIMENSIONS}, "
+        f"`vector.similarity_function`: '{VECTOR_SIMILARITY_FUNCTION}'"
+        "}}"
+    )
+    for label, index_name in VECTOR_INDEX_NAMES.items()
+)
+
+INDEX_STATEMENTS: tuple[str, ...] = (
+    NAME_INDEX_STATEMENTS + FULLTEXT_INDEX_STATEMENTS + VECTOR_INDEX_STATEMENTS
 )
 
 SCHEMA_STATEMENTS: tuple[str, ...] = CONSTRAINT_STATEMENTS + INDEX_STATEMENTS
@@ -133,7 +166,11 @@ def _run_statement(tx: ManagedTransaction, statement: str) -> None:
 
 
 def ensure_schema(client: GraphClient) -> None:
-    """Create uniqueness constraints and name indexes. Safe to call repeatedly."""
+    """Create uniqueness constraints, name indexes, full-text, and vector indexes.
+    
+    Args:
+        client: GraphClient.
+    """
     log.info("neo4j.ensure_schema.start")
     with client.session(write=True) as session:
         for statement in SCHEMA_STATEMENTS:

@@ -32,7 +32,14 @@ from core.analysis.prompts import (
     FIND_PATTERNS_PROMPT,
     FIND_PATTERNS_SYSTEM,
 )
-from core.analysis.snippets import PathTraversalError, get_snippet, repo_root_from_env
+from core.analysis.snippets import (
+    PathTraversalError,
+    cap_module_snippet_range,
+    get_snippet,
+    is_module_entity,
+    repo_root_from_env,
+    resolve_repo_path,
+)
 from core.exceptions import SchemaValidationError
 from core.llm.provider import LLMProvider, LLMResult, Message
 from core.logging import get_logger
@@ -51,7 +58,17 @@ class GraphLookup(Protocol):
         self,
         cypher: str,
         params: Mapping[str, Any] | None = None,
-    ) -> list[dict[str, Any]]: ...
+    ) -> list[dict[str, Any]]:
+        """Execute read-only Cypher and return row dicts.
+
+        Args:
+            cypher: Read-only Cypher query.
+            params: Query parameters, if any.
+
+        Returns:
+            Matching rows as dictionaries.
+        """
+        ...
 
 
 class CodeAnalystService:
@@ -65,13 +82,28 @@ class CodeAnalystService:
         repo_root: Path | str | None = None,
         agent: str = "code_analyst",
     ) -> None:
+        """Create the analysis service.
+
+        Args:
+            provider: LLM used for structured analysis.
+            graph_lookup: Callable that runs graph Cypher.
+            repo_root: Repository root for snippet reads.
+            agent: Agent name attached to LLM calls.
+        """
         self._provider = provider
         self._graph_lookup = graph_lookup
         self._repo_root = Path(repo_root) if repo_root is not None else repo_root_from_env()
         self._agent = agent
 
     async def analyze_function(self, qualified_name: str) -> FunctionAnalysis:
-        """Fetch function metadata + snippet, then return a structured LLM analysis."""
+        """Fetch function metadata + snippet, then return a structured LLM analysis.
+        
+        Args:
+            qualified_name: str.
+
+        Returns:
+            FunctionAnalysis.
+        """
         context = await self._function_context(qualified_name)
         if context is None:
             return FunctionAnalysis(
@@ -101,8 +133,15 @@ class CodeAnalystService:
         return _require_parsed(result, FunctionAnalysis, agent=self._agent)
 
     async def analyze_class(self, qualified_name: str) -> ClassAnalysis:
-        """Fetch class metadata + snippet, then return a structured LLM analysis."""
-        rows = await self._graph_lookup(CLASS_CONTEXT, {"qualified_name": qualified_name})
+        """Fetch class metadata + snippet, then return a structured LLM analysis.
+        
+        Args:
+            qualified_name: str.
+
+        Returns:
+            ClassAnalysis.
+        """
+        rows = await self._graph_lookup(CLASS_CONTEXT, {"name": qualified_name})
         if not rows:
             return ClassAnalysis(
                 qualified_name=qualified_name,
@@ -128,7 +167,14 @@ class CodeAnalystService:
         return _require_parsed(result, ClassAnalysis, agent=self._agent)
 
     async def find_patterns(self, pattern: str) -> PatternAnalysis:
-        """Find decorator / dependency_injection / factory instances, then explain them."""
+        """Find decorator / dependency_injection / factory instances, then explain them.
+        
+        Args:
+            pattern: str.
+
+        Returns:
+            PatternAnalysis.
+        """
         cypher = pattern_cypher(pattern)
         if cypher is None:
             supported = list(SUPPORTED_PATTERNS)
@@ -182,31 +228,61 @@ class CodeAnalystService:
         line_end: int | None = None,
         context: int = 5,
     ) -> SnippetResult:
-        """Retrieve numbered source. No LLM call."""
-        path = file_path
+        """Retrieve numbered source. No LLM call.
+        
+        Args:
+            qualified_name: str | None.
+            file_path: str | None.
+            line_start: int | None.
+            line_end: int | None.
+            context: int.
+
+        Returns:
+            SnippetResult.
+        """
+        path = file_path if file_path else None
         start = line_start
         end = line_end
-        if path is None or start is None or end is None:
-            if not qualified_name:
+        path_ok = path is not None and self._repo_file_exists(path)
+        if (
+            path is not None
+            and not path_ok
+            and self._is_path_traversal(path)
+            and not qualified_name
+        ):
+            return self._read_snippet(path, start or 1, end or start or 1, context=context)
+        if not path_ok or start is None or end is None:
+            lookup_name = qualified_name or (path if path and not path_ok else None)
+            if not lookup_name:
                 return SnippetResult(
                     error="Provide qualified_name or file_path with line_start and line_end"
                 )
-            rows = await self._graph_lookup(
-                ENTITY_LOCATION,
-                {"qualified_name": qualified_name},
-            )
+            rows = await self._graph_lookup(ENTITY_LOCATION, {"name": lookup_name})
             if not rows:
-                return SnippetResult(error=f"Entity not found: {qualified_name}")
+                return SnippetResult(error=f"Entity not found: {lookup_name}")
             row = rows[0]
-            path = path or _str(row.get("file_path"))
-            start = start if start is not None else _opt_int(row.get("line_start"))
-            end = end if end is not None else _opt_int(row.get("line_end"))
+            if not path_ok:
+                path = _str(row.get("file_path"))
+                start = _opt_int(row.get("line_start"))
+                end = _opt_int(row.get("line_end"))
+            else:
+                start = start if start is not None else _opt_int(row.get("line_start"))
+                end = end if end is not None else _opt_int(row.get("line_end"))
+            if is_module_entity(row) and start is not None and end is not None:
+                start, end = cap_module_snippet_range(start, end)
         if not path or start is None or end is None:
             return SnippetResult(error="Missing file_path or line range")
         return self._read_snippet(path, start, end, context=context)
 
     async def explain_implementation(self, qualified_name: str) -> ImplementationExplanation:
-        """Explain a function, method, or class using graph context and source."""
+        """Explain a function, method, or class using graph context and source.
+        
+        Args:
+            qualified_name: str.
+
+        Returns:
+            ImplementationExplanation.
+        """
         context = await self._function_context(qualified_name)
         if context is not None:
             snippet = self._snippet_from_row(context)
@@ -238,13 +314,12 @@ class CodeAnalystService:
                 agent=self._agent,
             )
 
-        rows = await self._graph_lookup(CLASS_CONTEXT, {"qualified_name": qualified_name})
-        if not rows:
+        class_context = await self._class_context(qualified_name)
+        if class_context is None:
             return ImplementationExplanation(
                 qualified_name=qualified_name,
                 error=f"Entity not found: {qualified_name}",
             )
-        class_context = rows[0]
         snippet = self._snippet_from_row(class_context)
         if snippet.error:
             return ImplementationExplanation(
@@ -273,9 +348,17 @@ class CodeAnalystService:
         return _require_parsed(result, ImplementationExplanation, agent=self._agent)
 
     async def compare_implementations(self, name_a: str, name_b: str) -> ImplementationComparison:
-        """Two snippets + graph context side by side, structured comparison output."""
-        context_a = await self._function_context(name_a)
-        context_b = await self._function_context(name_b)
+        """Two snippets + graph context side by side, structured comparison output.
+        
+        Args:
+            name_a: str.
+            name_b: str.
+
+        Returns:
+            ImplementationComparison.
+        """
+        context_a = await self._callable_or_class_context(name_a)
+        context_b = await self._callable_or_class_context(name_b)
         missing: list[str] = []
         if context_a is None:
             missing.append(name_a)
@@ -323,11 +406,31 @@ class CodeAnalystService:
         return _require_parsed(result, ImplementationComparison, agent=self._agent)
 
     async def _function_context(self, qualified_name: str) -> dict[str, Any] | None:
-        rows = await self._graph_lookup(
-            FUNCTION_CONTEXT,
-            {"qualified_name": qualified_name},
-        )
+        rows = await self._graph_lookup(FUNCTION_CONTEXT, {"name": qualified_name})
         return rows[0] if rows else None
+
+    async def _class_context(self, qualified_name: str) -> dict[str, Any] | None:
+        rows = await self._graph_lookup(CLASS_CONTEXT, {"name": qualified_name})
+        return rows[0] if rows else None
+
+    async def _callable_or_class_context(self, qualified_name: str) -> dict[str, Any] | None:
+        context = await self._function_context(qualified_name)
+        if context is not None:
+            return context
+        return await self._class_context(qualified_name)
+
+    def _repo_file_exists(self, file_path: str) -> bool:
+        try:
+            return resolve_repo_path(file_path, self._repo_root).is_file()
+        except PathTraversalError:
+            return False
+
+    def _is_path_traversal(self, file_path: str) -> bool:
+        try:
+            resolve_repo_path(file_path, self._repo_root)
+        except PathTraversalError:
+            return True
+        return False
 
     def _snippet_from_row(self, row: Mapping[str, Any], context: int = 5) -> SnippetResult:
         path = _str(row.get("file_path"))
@@ -335,6 +438,8 @@ class CodeAnalystService:
         end = _opt_int(row.get("line_end"))
         if not path or start is None or end is None:
             return SnippetResult(error="Missing file_path or line range")
+        if is_module_entity(row):
+            start, end = cap_module_snippet_range(start, end)
         return self._read_snippet(path, start, end, context=context)
 
     def _read_snippet(
@@ -393,7 +498,15 @@ class CodeAnalystService:
 
 
 def render_prompt(template: str, mapping: Mapping[str, str]) -> str:
-    """Replace ``{name}`` placeholders without interpreting braces in snippet text."""
+    """Replace ``{name}`` placeholders without interpreting braces in snippet text.
+    
+    Args:
+        template: str.
+        mapping: Mapping[str, str].
+
+    Returns:
+        str.
+    """
     rendered = template
     for key, value in mapping.items():
         rendered = rendered.replace("{" + key + "}", value)

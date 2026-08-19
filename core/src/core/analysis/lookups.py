@@ -7,7 +7,7 @@ from textwrap import dedent
 FUNCTION_CONTEXT = dedent(
     """\
     MATCH (n)
-    WHERE (n:Function OR n:Method) AND n.qualified_name = $qualified_name
+    WHERE (n:Function OR n:Method) AND (n.name = $name OR n.qualified_name = $name)
     OPTIONAL MATCH (n)-[:HAS_PARAMETER]->(p:Parameter)
     WITH n, collect(DISTINCT p { .name, .annotation, .default, .position }) AS parameters
     OPTIONAL MATCH (n)-[:DECORATED_BY]->(d:Decorator)
@@ -34,7 +34,7 @@ FUNCTION_CONTEXT = dedent(
 CLASS_CONTEXT = dedent(
     """\
     MATCH (n:Class)
-    WHERE n.qualified_name = $qualified_name
+    WHERE n.name = $name OR n.qualified_name = $name
     OPTIONAL MATCH (n)-[:CONTAINS]->(m:Method)
     WITH n, collect(DISTINCT m.qualified_name) AS methods
     OPTIONAL MATCH (n)-[:INHERITS_FROM]->(b)
@@ -58,8 +58,10 @@ CLASS_CONTEXT = dedent(
 ENTITY_LOCATION = dedent(
     """\
     MATCH (n)
-    WHERE n.qualified_name = $qualified_name
+    WHERE n.name = $name OR n.qualified_name = $name
     RETURN n.qualified_name AS qualified_name,
+           n.name AS name,
+           labels(n) AS labels,
            n.file_path AS file_path,
            n.line_start AS line_start,
            n.line_end AS line_end

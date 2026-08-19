@@ -34,9 +34,17 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["core"]
+source = [
+    "core",
+    "orchestrator",
+    "indexer",
+    "graph_query",
+    "code_analyst",
+    "memory",
+    "gateway",
+]
 branch = true
-omit = ["core/tests/*"]
+omit = ["*/tests/*", "core/tests/*"]
 
 [tool.coverage.report]
 show_missing = true
@@ -61,7 +69,18 @@ src = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = ["E", "F", "I", "UP", "B", "D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"agents/**" = ["D"]
+"gateway/**" = ["D"]
+"tests/**" = ["D"]
+"core/tests/**" = ["D"]
+"scripts/**" = ["D"]
+"core/tests/fixtures/**" = ["D"]
 
 [tool.mypy]
 python_version = "3.12"

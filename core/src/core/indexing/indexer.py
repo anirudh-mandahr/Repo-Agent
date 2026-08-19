@@ -22,6 +22,7 @@ from core.graph.upserts import (
     DecoratorRelRow,
     DependsOnRow,
     DocstringRecord,
+    EmbeddingRecord,
     FileRecord,
     FunctionRecord,
     ImportDependsOnRow,
@@ -41,6 +42,7 @@ from core.graph.upserts import (
     upsert_decorators,
     upsert_depends_on,
     upsert_docstrings,
+    upsert_embeddings,
     upsert_files,
     upsert_functions,
     upsert_import_depends_on,
@@ -54,6 +56,7 @@ from core.graph.upserts import (
 from core.indexing.cloner import clone_repo
 from core.indexing.parser import (
     ParsedCallable,
+    ParsedClass,
     ParsedDocstring,
     ParsedFile,
     ParseError,
@@ -61,6 +64,11 @@ from core.indexing.parser import (
     parse_file,
 )
 from core.logging import bind_correlation_id, get_correlation_id, get_logger
+from core.querying.embeddings import (
+    EmbeddingProvider,
+    build_embedding_text,
+    default_embedding_provider,
+)
 from core.settings import IndexingSettings
 
 log = get_logger(__name__)
@@ -109,9 +117,27 @@ class IndexGraphClient(Protocol):
         query: str,
         params: Mapping[str, Any] | None = None,
         timeout_s: float = 10,
-    ) -> list[dict[str, Any]]: ...
+    ) -> list[dict[str, Any]]:
+        """Run a read-only Cypher query.
 
-    def run_write_batch(self, query: str, rows: Sequence[Mapping[str, Any]]) -> None: ...
+        Args:
+            query: Cypher text.
+            params: Query parameters.
+            timeout_s: Per-query timeout in seconds.
+
+        Returns:
+            Result rows as dictionaries.
+        """
+        ...
+
+    def run_write_batch(self, query: str, rows: Sequence[Mapping[str, Any]]) -> None:
+        """Execute a batched UNWIND write.
+
+        Args:
+            query: Cypher using ``UNWIND $rows``.
+            rows: Parameter rows to write.
+        """
+        ...
 
 
 class IndexReport(BaseModel):
@@ -127,6 +153,8 @@ class IndexReport(BaseModel):
     unresolved_calls: int = 0
     duration_s: float = 0.0
     detail: str | None = None
+    files_purged: int = 0
+    mode: Literal["full", "incremental"] = "incremental"
 
 
 class IndexStatus(BaseModel):
@@ -141,17 +169,30 @@ class IndexStatus(BaseModel):
 
 
 def already_running_report() -> IndexReport:
-    """Return the payload used when an index pass is already in progress."""
+    """Return the payload used when an index pass is already in progress.
+    
+    Returns:
+        IndexReport.
+    """
     return IndexReport(status="already_running", detail="index already running")
 
 
 def walk_python_files(
     repo_root: str | Path,
     *,
-    skip_tests: bool = True,
-    skip_docs: bool = True,
+    skip_tests: bool = False,
+    skip_docs: bool = False,
 ) -> Iterator[Path]:
-    """Yield ``*.py`` files under ``repo_root``, optionally skipping tests/ and docs/."""
+    """Yield ``*.py`` files under ``repo_root``, optionally skipping tests/ and docs/.
+    
+    Args:
+        repo_root: str | Path.
+        skip_tests: bool.
+        skip_docs: bool.
+
+    Returns:
+        Iterator[Path].
+    """
     root = Path(repo_root)
     skip_dirs = set(SKIP_DIR_NAMES)
     if skip_tests:
@@ -170,7 +211,14 @@ def walk_python_files(
 
 
 def load_file_hashes(client: IndexGraphClient) -> dict[str, str]:
-    """Load existing ``{path: content_hash}`` from the graph in one query."""
+    """Load existing ``{path: content_hash}`` from the graph in one query.
+    
+    Args:
+        client: IndexGraphClient.
+
+    Returns:
+        dict[str, str].
+    """
     rows = client.run_read(LOAD_FILE_HASHES_QUERY)
     hashes: dict[str, str] = {}
     for row in rows:
@@ -181,8 +229,33 @@ def load_file_hashes(client: IndexGraphClient) -> dict[str, str]:
     return hashes
 
 
+def purge_stale_files(client: IndexGraphClient, stale_paths: Sequence[str]) -> int:
+    """DETACH DELETE file subtrees whose paths are no longer on disk.
+    
+    Args:
+        client: IndexGraphClient.
+        stale_paths: Sequence[str].
+
+    Returns:
+        int.
+    """
+    if not stale_paths:
+        return 0
+    query, _rows = delete_file_subtree(stale_paths[0])
+    client.run_write_batch(query, [{"path": path} for path in stale_paths])
+    log.info("index.purge_stale", files_purged=len(stale_paths))
+    return len(stale_paths)
+
+
 def query_graph_counts(client: IndexGraphClient) -> tuple[int, int]:
-    """Return ``(node_count, rel_count)`` from a live read-only query."""
+    """Return ``(node_count, rel_count)`` from a live read-only query.
+    
+    Args:
+        client: IndexGraphClient.
+
+    Returns:
+        tuple[int, int].
+    """
     rows = client.run_read(GRAPH_COUNTS_QUERY)
     if not rows:
         return 0, 0
@@ -191,7 +264,14 @@ def query_graph_counts(client: IndexGraphClient) -> tuple[int, int]:
 
 
 def query_label_counts(client: IndexGraphClient) -> dict[str, int]:
-    """Return live node counts keyed by label."""
+    """Return live node counts keyed by label.
+    
+    Args:
+        client: IndexGraphClient.
+
+    Returns:
+        dict[str, int].
+    """
     rows = client.run_read(LABEL_COUNTS_QUERY)
     counts = {label: 0 for label in NODE_LABELS}
     for row in rows:
@@ -207,12 +287,32 @@ def index_repository(
     *,
     skip_tests: bool | None = None,
     skip_docs: bool | None = None,
+    embedding_provider: EmbeddingProvider | None = None,
+    mode: Literal["full", "incremental"] = "incremental",
 ) -> IndexReport:
-    """Parse ``*.py`` files and upsert new/changed files into the graph."""
+    """Parse ``*.py`` files and upsert new/changed files into the graph.
+
+    ``incremental`` (default) skips files whose content hash is unchanged.
+    ``full`` re-parses every file regardless of hash.
+
+    Args:
+        client: IndexGraphClient.
+        repo_root: str | Path.
+        skip_tests: bool | None.
+        skip_docs: bool | None.
+        embedding_provider: EmbeddingProvider | None.
+        mode: ``full`` or ``incremental``.
+
+    Returns:
+        IndexReport.
+    """
     bind_correlation_id(get_correlation_id() if get_correlation_id() != "-" else None)
     settings = IndexingSettings.from_env()
     skip_tests = settings.skip_tests if skip_tests is None else skip_tests
     skip_docs = settings.skip_docs if skip_docs is None else skip_docs
+    index_mode: Literal["full", "incremental"] = (
+        mode if mode in {"full", "incremental"} else "incremental"
+    )
     root = Path(repo_root)
     started = time.perf_counter()
 
@@ -223,21 +323,24 @@ def index_repository(
         file_count=len(paths),
         skip_tests=skip_tests,
         skip_docs=skip_docs,
+        mode=index_mode,
     )
 
     existing = load_file_hashes(client)
     parse_errors: list[ParseError] = []
     to_upsert: list[ParsedFile] = []
     changed_paths: list[str] = []
+    seen_rel: set[str] = set()
     files_skipped = 0
     files_seen = 0
 
     for path in paths:
         files_seen += 1
         rel = path.resolve().relative_to(root.resolve()).as_posix()
+        seen_rel.add(rel)
         content_hash = hash_file(path)
         previous = existing.get(rel)
-        if previous == content_hash:
+        if index_mode != "full" and previous == content_hash:
             files_skipped += 1
         else:
             parsed = parse_file(path, root)
@@ -256,6 +359,9 @@ def index_repository(
                 parse_errors=len(parse_errors),
             )
 
+    stale_paths = [path for path in existing if path not in seen_rel]
+    files_purged = purge_stale_files(client, stale_paths)
+
     nodes_written = 0
     rels_written = 0
     unresolved_calls = 0
@@ -263,7 +369,11 @@ def index_repository(
         if changed_paths:
             query, _rows = delete_file_subtree(changed_paths[0])
             client.run_write_batch(query, [{"path": p} for p in changed_paths])
-        nodes_written, rels_written, unresolved_calls = _upsert_parsed_files(client, to_upsert)
+        nodes_written, rels_written, unresolved_calls = _upsert_parsed_files(
+            client,
+            to_upsert,
+            embedding_provider=embedding_provider,
+        )
     _update_index_version(client)
 
     duration_s = time.perf_counter() - started
@@ -272,17 +382,20 @@ def index_repository(
         files_seen=files_seen,
         files_indexed=len(to_upsert),
         files_skipped=files_skipped,
+        files_purged=files_purged,
         nodes_written=nodes_written,
         rels_written=rels_written,
         parse_errors=parse_errors,
         unresolved_calls=unresolved_calls,
         duration_s=duration_s,
+        mode=index_mode,
     )
     log.info(
         "index.done",
         files_seen=report.files_seen,
         files_indexed=report.files_indexed,
         files_skipped=report.files_skipped,
+        files_purged=report.files_purged,
         nodes_written=report.nodes_written,
         rels_written=report.rels_written,
         unresolved_calls=report.unresolved_calls,
@@ -296,8 +409,20 @@ def index_file(
     client: IndexGraphClient,
     repo_root: str | Path,
     path: str,
+    *,
+    embedding_provider: EmbeddingProvider | None = None,
 ) -> IndexReport:
-    """Hash-check and reindex a single file, reusing delete_file_subtree + upsert."""
+    """Hash-check and reindex a single file, reusing delete_file_subtree + upsert.
+    
+    Args:
+        client: IndexGraphClient.
+        repo_root: str | Path.
+        path: str.
+        embedding_provider: EmbeddingProvider | None.
+
+    Returns:
+        IndexReport.
+    """
     bind_correlation_id(get_correlation_id() if get_correlation_id() != "-" else None)
     root = Path(repo_root)
     started = time.perf_counter()
@@ -345,7 +470,11 @@ def index_file(
         query, rows = delete_file_subtree(rel)
         client.run_write_batch(query, rows)
 
-    nodes_written, rels_written, unresolved_calls = _upsert_parsed_files(client, [parsed])
+    nodes_written, rels_written, unresolved_calls = _upsert_parsed_files(
+        client,
+        [parsed],
+        embedding_provider=embedding_provider,
+    )
     _update_index_version(client)
     report = IndexReport(
         status="ok",
@@ -369,8 +498,19 @@ def index_file(
 def clone_and_index(
     repo_url: str | None = None,
     repo_root: str | Path | None = None,
+    *,
+    mode: Literal["full", "incremental"] = "incremental",
 ) -> IndexReport:
-    """Clone (or update) the target repo and index it into Neo4j."""
+    """Clone (or update) the target repo and index it into Neo4j.
+
+    Args:
+        repo_url: str | None.
+        repo_root: str | Path | None.
+        mode: ``incremental`` skips unchanged hashes; ``full`` re-parses all files.
+
+    Returns:
+        IndexReport.
+    """
     settings = IndexingSettings.from_env()
     url = repo_url or settings.repo_url
     dest = Path(repo_root) if repo_root is not None else Path(settings.repo_root)
@@ -379,7 +519,7 @@ def clone_and_index(
         clone_repo(url, dest)
         with GraphClient() as client:
             ensure_schema(client)
-            report = index_repository(client, dest)
+            report = index_repository(client, dest, mode=mode)
         report = report.model_copy(update={"duration_s": time.perf_counter() - started})
         save_report(report)
         return report
@@ -395,7 +535,15 @@ def clone_and_index(
 
 
 def run_index_file(path: str, repo_root: str | Path | None = None) -> IndexReport:
-    """Open Neo4j and reindex a single file under the configured repo root."""
+    """Open Neo4j and reindex a single file under the configured repo root.
+    
+    Args:
+        path: str.
+        repo_root: str | Path | None.
+
+    Returns:
+        IndexReport.
+    """
     settings = IndexingSettings.from_env()
     dest = Path(repo_root) if repo_root is not None else Path(settings.repo_root)
     started = time.perf_counter()
@@ -417,14 +565,26 @@ def run_index_file(path: str, repo_root: str | Path | None = None) -> IndexRepor
 
 
 def save_report(report: IndexReport, path: str | Path | None = None) -> None:
-    """Persist ``report`` as JSON so status can be read across processes."""
+    """Persist ``report`` as JSON so status can be read across processes.
+    
+    Args:
+        report: IndexReport.
+        path: str | Path | None.
+    """
     report_path = Path(path) if path is not None else Path(IndexingSettings.from_env().report_path)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report.model_dump_json())
 
 
 def read_saved_report(path: str | Path | None = None) -> IndexReport | None:
-    """Load the last saved ``IndexReport``, if present."""
+    """Load the last saved ``IndexReport``, if present.
+    
+    Args:
+        path: str | Path | None.
+
+    Returns:
+        IndexReport | None.
+    """
     report_path = Path(path) if path is not None else Path(IndexingSettings.from_env().report_path)
     if not report_path.is_file():
         return None
@@ -440,7 +600,15 @@ def load_index_status(
     last_report: IndexReport | None = None,
     running: bool = False,
 ) -> IndexStatus:
-    """Return last report (memory or disk) plus live node/relationship counts."""
+    """Return last report (memory or disk) plus live node/relationship counts.
+    
+    Args:
+        last_report: IndexReport | None.
+        running: bool.
+
+    Returns:
+        IndexStatus.
+    """
     report = last_report or read_saved_report()
     try:
         with GraphClient() as client:
@@ -468,6 +636,8 @@ def load_index_status(
 def _upsert_parsed_files(
     client: IndexGraphClient,
     parsed_files: Sequence[ParsedFile],
+    *,
+    embedding_provider: EmbeddingProvider | None = None,
 ) -> tuple[int, int, int]:
     file_records: list[FileRecord] = []
     module_records: list[ModuleRecord] = []
@@ -673,6 +843,10 @@ def _upsert_parsed_files(
                 )
             )
     rels += _write(client, *upsert_calls(call_rows))
+    embedding_rows = _embedding_records(parsed_files, embedding_provider)
+    if embedding_rows:
+        _write(client, *upsert_embeddings(embedding_rows))
+        log.info("index.embeddings_written", count=len(embedding_rows))
 
     nodes = (
         len(file_records)
@@ -686,6 +860,62 @@ def _upsert_parsed_files(
         + len(docstring_records)
     )
     return nodes, rels, unresolved
+
+
+def _embedding_records(
+    parsed_files: Sequence[ParsedFile],
+    embedding_provider: EmbeddingProvider | None,
+) -> list[EmbeddingRecord]:
+    provider = embedding_provider or default_embedding_provider()
+    documents: list[tuple[str, str]] = []
+    for parsed in parsed_files:
+        for cls in parsed.classes:
+            documents.append((cls.qualified_name, _class_embedding_text(cls)))
+        for fn in parsed.functions:
+            documents.append((fn.qualified_name, _callable_embedding_text(fn)))
+        for method in parsed.methods:
+            documents.append((method.qualified_name, _callable_embedding_text(method)))
+    if not documents:
+        return []
+    vectors = list(provider.embed([text for _qn, text in documents]))
+    if len(vectors) != len(documents):
+        log.warning(
+            "index.embedding_length_mismatch",
+            expected=len(documents),
+            actual=len(vectors),
+        )
+        return []
+    records: list[EmbeddingRecord] = []
+    for (qualified_name, text), vector in zip(documents, vectors, strict=True):
+        records.append(
+            EmbeddingRecord(
+                qualified_name=qualified_name,
+                embedding=[float(value) for value in vector],
+                embedding_text=text[:4000],
+            )
+        )
+    return records
+
+
+def _class_embedding_text(cls: ParsedClass) -> str:
+    docstring = cls.docstring.text if cls.docstring is not None else ""
+    return build_embedding_text(
+        qualified_name=cls.qualified_name,
+        name=cls.name,
+        docstring=docstring,
+        source_summary=cls.source_summary,
+    )
+
+
+def _callable_embedding_text(item: ParsedCallable) -> str:
+    docstring = item.docstring.text if item.docstring is not None else ""
+    return build_embedding_text(
+        qualified_name=item.qualified_name,
+        name=item.name,
+        docstring=docstring,
+        source_summary=item.source_summary,
+        param_names=[param.name for param in item.parameters],
+    )
 
 
 def _function_record(fn: ParsedCallable, file_path: str) -> FunctionRecord:
@@ -804,7 +1034,14 @@ def _write(
 
 
 def compute_index_version(file_hashes: Mapping[str, str]) -> str:
-    """Hash sorted ``path:content_hash`` entries into one stable index version."""
+    """Hash sorted ``path:content_hash`` entries into one stable index version.
+    
+    Args:
+        file_hashes: Mapping[str, str].
+
+    Returns:
+        str.
+    """
     digest = hashlib.sha256()
     for path, content_hash in sorted(file_hashes.items()):
         digest.update(path.encode("utf-8"))
@@ -815,7 +1052,14 @@ def compute_index_version(file_hashes: Mapping[str, str]) -> str:
 
 
 def load_index_meta(client: IndexGraphClient) -> tuple[str | None, str | None]:
-    """Return stored ``(index_version, last_indexed_at)`` if present."""
+    """Return stored ``(index_version, last_indexed_at)`` if present.
+    
+    Args:
+        client: IndexGraphClient.
+
+    Returns:
+        tuple[str | None, str | None].
+    """
     rows = client.run_read(LOAD_INDEX_META_QUERY)
     if not rows:
         return None, None
@@ -860,6 +1104,7 @@ __all__ = [
     "index_repository",
     "load_index_meta",
     "load_index_status",
+    "purge_stale_files",
     "query_graph_counts",
     "query_label_counts",
     "run_index_file",

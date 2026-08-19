@@ -62,6 +62,34 @@ def test_clone_repo_raises_on_git_failure(
         clone_repo("https://github.com/fastapi/fastapi", tmp_path / "repo")
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///etc/passwd",
+        "http://169.254.169.254/",
+        "git@github.com:org/repo.git;id",
+        "ssh://github.com/org/repo.git",
+        "https://evil.example/repo.git",
+        "https://github.com.evil.com/repo.git",
+    ],
+)
+def test_clone_repo_rejects_unallowlisted_urls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    from core.exceptions import UnsafeCloneUrlError
+    from core.indexing.cloner import validate_clone_url
+
+    def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("git subprocess must not run for rejected URLs")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(UnsafeCloneUrlError):
+        validate_clone_url(url)
+    with pytest.raises(UnsafeCloneUrlError):
+        clone_repo(url, tmp_path / "repo")
+    assert not (tmp_path / "repo").exists() or not any((tmp_path / "repo").iterdir())
+
+
 def test_indexing_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("REPO_URL", "https://example.com/repo.git")
     monkeypatch.setenv("REPO_ROOT", "/tmp/repo")
@@ -72,4 +100,9 @@ def test_indexing_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.repo_root == "/tmp/repo"
     assert settings.skip_tests is False
     assert settings.skip_docs is False
+
+
+def test_indexing_settings_default_to_full_profile() -> None:
+    assert IndexingSettings.model_fields["skip_tests"].default is False
+    assert IndexingSettings.model_fields["skip_docs"].default is False
 

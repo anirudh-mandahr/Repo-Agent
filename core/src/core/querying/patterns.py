@@ -65,5 +65,12 @@ PATTERN_TEMPLATES: dict[str, str] = {
 
 
 def pattern_cypher(pattern: str) -> str | None:
-    """Return the fixed Cypher template for ``pattern``, or ``None`` if unknown."""
+    """Return the fixed Cypher template for ``pattern``, or ``None`` if unknown.
+    
+    Args:
+        pattern: str.
+
+    Returns:
+        str | None.
+    """
     return PATTERN_TEMPLATES.get(pattern)

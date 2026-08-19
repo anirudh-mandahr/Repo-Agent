@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from code_analyst.graph_lookup import GraphQueryLookup
+from core.analysis.graph_lookup import GraphQueryLookup, build_code_analyst_pool
 from core.analysis.models import (
     ClassAnalysis,
     FunctionAnalysis,
@@ -16,12 +16,12 @@ from core.analysis.models import (
     SnippetResult,
 )
 from core.analysis.service import CodeAnalystService
-from core.health import HealthStatus, agent_health
-from core.llm.offline_provider import OfflineProvider
-from core.llm.openrouter_provider import OpenRouterProvider
-from core.llm.provider import LLMProvider
+from core.health import HealthStatus, check_code_analyst_health
+from core.llm.factory import build_llm_provider
 from core.logging import bind_correlation_id, configure_logging, get_logger
-from core.settings import AgentRuntimeSettings, AnalysisSettings, LLMSettings
+from core.mcp.context import bind_mcp_context
+from core.mcp.server import run_agent_mcp
+from core.settings import AgentRuntimeSettings, AnalysisSettings
 
 AGENT_NAME = "code_analyst"
 DEFAULT_PORT = 8004
@@ -45,49 +45,22 @@ mcp = FastMCP(
     json_response=True,
 )
 
-
-def _build_llm_provider() -> LLMProvider:
-    llm_settings = LLMSettings.from_env()
-    if llm_settings.api_key:
-        return OpenRouterProvider.from_env()
-    log.warning("analysis.offline_provider", reason="OPENROUTER_API_KEY unset")
-    return OfflineProvider()
-
-
+_pool = build_code_analyst_pool()
 _service = CodeAnalystService(
-    _build_llm_provider(),
-    GraphQueryLookup(_analysis_settings.graph_query_url),
+    build_llm_provider(),
+    GraphQueryLookup(_pool),
     repo_root=_analysis_settings.repo_root,
 )
 
 
-def _correlation_id_from_meta(ctx: ToolContext | None) -> str | None:
-    if ctx is None:
-        return None
-    try:
-        meta = ctx.request_context.meta
-    except ValueError:
-        return None
-    if meta is None:
-        return None
-    raw = getattr(meta, "correlation_id", None)
-    if raw is None and meta.model_extra:
-        raw = meta.model_extra.get("correlation_id")
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    return text or None
-
-
-def _bind_meta(ctx: ToolContext | None) -> str:
-    return bind_correlation_id(_correlation_id_from_meta(ctx))
-
-
 @mcp.tool()
-def health(ctx: ToolContext | None = None) -> HealthStatus:
-    """Return agent liveness."""
-    _bind_meta(ctx)
-    status = agent_health(AGENT_NAME)
+async def health(ctx: ToolContext | None = None) -> HealthStatus:
+    """Return agent liveness after probing /repo and graph_query."""
+    bind_mcp_context(ctx)
+    status = await check_code_analyst_health(
+        repo_root=_analysis_settings.repo_root,
+        graph_query_url=_analysis_settings.graph_query_url,
+    )
     log.info("health.check", agent=AGENT_NAME, status=status.status)
     return status
 
@@ -98,7 +71,7 @@ async def analyze_function(
     ctx: ToolContext | None = None,
 ) -> FunctionAnalysis:
     """Analyze a function or method using graph context and its source snippet."""
-    _bind_meta(ctx)
+    bind_mcp_context(ctx)
     result = await _service.analyze_function(qualified_name)
     log.info(
         "analysis.analyze_function",
@@ -114,7 +87,7 @@ async def analyze_class(
     ctx: ToolContext | None = None,
 ) -> ClassAnalysis:
     """Analyze a class using its methods, bases, decorators, and source snippet."""
-    _bind_meta(ctx)
+    bind_mcp_context(ctx)
     result = await _service.analyze_class(qualified_name)
     log.info("analysis.analyze_class", qualified_name=qualified_name, error=result.error)
     return result
@@ -123,7 +96,7 @@ async def analyze_class(
 @mcp.tool()
 async def find_patterns(pattern: str, ctx: ToolContext | None = None) -> PatternAnalysis:
     """Find decorator, dependency_injection, or factory instances and explain them."""
-    _bind_meta(ctx)
+    bind_mcp_context(ctx)
     result = await _service.find_patterns(pattern)
     log.info(
         "analysis.find_patterns",
@@ -143,7 +116,7 @@ async def get_code_snippet(
     ctx: ToolContext | None = None,
 ) -> SnippetResult:
     """Return numbered source for a qualified name or a file path and line range."""
-    _bind_meta(ctx)
+    bind_mcp_context(ctx)
     result = await _service.get_code_snippet(
         qualified_name=qualified_name,
         file_path=file_path,
@@ -165,16 +138,8 @@ async def explain_implementation(
     ctx: ToolContext | None = None,
 ) -> ImplementationExplanation:
     """Explain how a function, method, or class is implemented."""
-    _bind_meta(ctx)
-    try:
-        result = await _service.explain_implementation(qualified_name)
-    except Exception as exc:
-        log.error(
-            "analysis.explain_implementation_failed",
-            qualified_name=qualified_name,
-            error=str(exc),
-        )
-        return ImplementationExplanation(qualified_name=qualified_name, error=str(exc))
+    bind_mcp_context(ctx)
+    result = await _service.explain_implementation(qualified_name)
     log.info(
         "analysis.explain_implementation",
         qualified_name=qualified_name,
@@ -190,7 +155,7 @@ async def compare_implementations(
     ctx: ToolContext | None = None,
 ) -> ImplementationComparison:
     """Compare two functions or methods side by side."""
-    _bind_meta(ctx)
+    bind_mcp_context(ctx)
     result = await _service.compare_implementations(name_a, name_b)
     log.info(
         "analysis.compare_implementations",
@@ -205,7 +170,7 @@ def main() -> None:
     """Run the FastMCP server with streamable HTTP transport."""
     bind_correlation_id()
     log.info("agent.start", agent=AGENT_NAME, host=_settings.host, port=_settings.port)
-    mcp.run(transport="streamable-http")
+    run_agent_mcp(mcp, agent=AGENT_NAME)
 
 
 if __name__ == "__main__":

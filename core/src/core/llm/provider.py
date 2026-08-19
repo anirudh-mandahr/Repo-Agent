@@ -28,6 +28,26 @@ class Message(BaseModel):
     content: str
 
 
+class TokenUsage(BaseModel):
+    """Token accounting attached to every provider response."""
+
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    estimated: bool = False
+    model: str | None = None
+    cached_prompt_tokens: int = 0
+
+    @property
+    def uncached_prompt_tokens(self) -> int:
+        """Prompt tokens that were not served from the provider cache.
+
+        Returns:
+            Non-negative uncached prompt count.
+        """
+        return max(0, self.prompt_tokens - self.cached_prompt_tokens)
+
+
 class LLMResult(BaseModel):
     """Completion text plus an optional validated structured payload."""
 
@@ -36,15 +56,8 @@ class LLMResult(BaseModel):
     text: str
     parsed: BaseModel | None = None
     usage: TokenUsage
-
-
-class TokenUsage(BaseModel):
-    """Token accounting attached to every provider response."""
-
-    prompt_tokens: int
-    completion_tokens: int
-    total_tokens: int
-    estimated: bool = False
+    schema_attempts: int = 1
+    first_attempt_valid: bool = True
 
 
 LLMPurpose = Literal["routing", "synthesis", "analysis", "summarization"]
@@ -62,8 +75,21 @@ class LLMProvider(Protocol):
         purpose: LLMPurpose,
         agent: str = "llm",
         max_tokens: int = 1024,
+        temperature: float | None = None,
     ) -> LLMResult:
-        """Return a completion. Validate against ``response_model`` when given."""
+        """Return a completion. Validate against ``response_model`` when given.
+        
+        Args:
+            messages: list[Message].
+            response_model: type[BaseModel] | None.
+            purpose: LLMPurpose.
+            agent: str.
+            max_tokens: int.
+            temperature: Optional sampling temperature override.
+
+        Returns:
+            LLMResult.
+        """
         ...
 
 
@@ -74,7 +100,20 @@ def parse_structured[TModel: BaseModel](
     agent: str,
     correlation_id: str | None = None,
 ) -> TModel:
-    """Validate ``raw`` as ``response_model``, raising ``SchemaValidationError``."""
+    """Validate ``raw`` as ``response_model``, raising ``SchemaValidationError``.
+    
+    Args:
+        raw: str | Mapping[str, Any] | BaseModel.
+        response_model: type[TModel].
+        agent: str.
+        correlation_id: str | None.
+
+    Returns:
+        TModel.
+
+    Raises:
+        SchemaValidationError: See exception message.
+    """
     if isinstance(raw, response_model):
         return raw
     data: Any
@@ -108,7 +147,14 @@ def parse_structured[TModel: BaseModel](
 
 
 def as_text(raw: str | Mapping[str, Any] | BaseModel) -> str:
-    """Normalize a provider payload to text for ``LLMResult.text``."""
+    """Normalize a provider payload to text for ``LLMResult.text``.
+    
+    Args:
+        raw: str | Mapping[str, Any] | BaseModel.
+
+    Returns:
+        str.
+    """
     if isinstance(raw, str):
         return raw
     if isinstance(raw, BaseModel):
@@ -127,7 +173,22 @@ async def complete_with_schema_retry(
     purpose: LLMPurpose,
     agent: str,
 ) -> LLMResult:
-    """Invoke ``invoke`` and, when ``response_model`` is set, retry once on failure."""
+    """Invoke ``invoke`` and, when ``response_model`` is set, retry once on failure.
+    
+    Args:
+        invoke: Completion callable returning raw text and optional usage.
+        messages: Sequence[Message].
+        response_model: type[BaseModel] | None.
+        purpose: LLMPurpose.
+        agent: str.
+
+    Returns:
+        LLMResult.
+
+    Raises:
+        SchemaValidationError: See exception message.
+        last_error: See exception message.
+    """
     current = list(messages)
     last_error: SchemaValidationError | None = None
     attempts = MAX_SCHEMA_ATTEMPTS if response_model is not None else 1
@@ -137,11 +198,22 @@ async def complete_with_schema_retry(
         resolved_usage = usage or estimate_usage(current, text)
         _log_llm_call(purpose=purpose, usage=resolved_usage)
         if response_model is None:
-            return LLMResult(text=text, usage=resolved_usage)
+            return LLMResult(
+                text=text,
+                usage=resolved_usage,
+                schema_attempts=attempt + 1,
+                first_attempt_valid=True,
+            )
         try:
             parsed = parse_structured(raw, response_model, agent=agent)
             log.info("llm.complete", attempt=attempt, structured=True)
-            return LLMResult(text=text, parsed=parsed, usage=resolved_usage)
+            return LLMResult(
+                text=text,
+                parsed=parsed,
+                usage=resolved_usage,
+                schema_attempts=attempt + 1,
+                first_attempt_valid=attempt == 0,
+            )
         except SchemaValidationError as exc:
             last_error = exc
             log.warning(
@@ -162,8 +234,15 @@ async def complete_with_schema_retry(
 
 
 def estimate_usage(messages: Sequence[Message], text: str) -> TokenUsage:
-    """Return a cheap fallback usage estimate when providers omit it."""
+    """Return a cheap fallback usage estimate when providers omit it.
+    
+    Args:
+        messages: Sequence[Message].
+        text: str.
 
+    Returns:
+        TokenUsage.
+    """
     prompt_chars = sum(len(message.content) for message in messages)
     prompt_tokens = max(1, (prompt_chars + 3) // 4) if prompt_chars else 0
     completion_tokens = max(1, (len(text) + 3) // 4) if text else 0
@@ -172,6 +251,8 @@ def estimate_usage(messages: Sequence[Message], text: str) -> TokenUsage:
         completion_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
         estimated=True,
+        model=None,
+        cached_prompt_tokens=0,
     )
 
 
@@ -179,8 +260,11 @@ def _log_llm_call(*, purpose: LLMPurpose, usage: TokenUsage) -> None:
     log.info(
         "llm_call",
         purpose=purpose,
+        model=usage.model,
         prompt_tokens=usage.prompt_tokens,
         completion_tokens=usage.completion_tokens,
+        cached_prompt_tokens=usage.cached_prompt_tokens,
+        uncached_prompt_tokens=usage.uncached_prompt_tokens,
         total_tokens=usage.total_tokens,
         estimated=usage.estimated,
         correlation_id=get_correlation_id(),

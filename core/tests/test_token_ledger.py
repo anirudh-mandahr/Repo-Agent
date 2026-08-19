@@ -28,6 +28,8 @@ def test_token_ledger_sums_two_calls_per_correlation_id() -> None:
     assert closed["llm_calls"] == 2
     assert closed["by_purpose"]["routing"]["total"] == 120
     assert closed["by_purpose"]["synthesis"]["total"] == 60
+    assert "by_model" in closed
+    assert closed["cached_prompt"] == 0
 
 
 def test_token_ledger_does_not_cross_contaminate_concurrent_ids() -> None:
@@ -57,3 +59,38 @@ def test_token_ledger_does_not_cross_contaminate_concurrent_ids() -> None:
     assert closed_b["total"] == 60
     assert "routing" in closed_a["by_purpose"]
     assert "routing" not in closed_b["by_purpose"]
+
+
+def test_token_ledger_records_model_and_cached_prompt_separately() -> None:
+    ledger = TokenLedger()
+    ledger.open("corr-cache")
+    ledger.record(
+        "corr-cache",
+        "routing",
+        TokenUsage(
+            prompt_tokens=100,
+            completion_tokens=10,
+            total_tokens=110,
+            model="anthropic/claude-haiku-4.5",
+            cached_prompt_tokens=80,
+        ),
+    )
+    closed = ledger.close("corr-cache")
+    assert closed["cached_prompt"] == 80
+    assert closed["uncached_prompt"] == 20
+    assert closed["by_purpose"]["routing"]["model"] == "anthropic/claude-haiku-4.5"
+    assert closed["by_model"]["anthropic/claude-haiku-4.5"]["cached_prompt"] == 80
+    assert float(closed["cost_usd"]) > 0
+    haiku_cost = float(closed["by_model"]["anthropic/claude-haiku-4.5"]["cost_usd"])
+    sonnet_usage = TokenUsage(
+        prompt_tokens=100,
+        completion_tokens=10,
+        total_tokens=110,
+        model="anthropic/claude-sonnet-4.5",
+        cached_prompt_tokens=80,
+    )
+    other = TokenLedger()
+    other.open("corr-sonnet")
+    other.record("corr-sonnet", "routing", sonnet_usage)
+    sonnet_cost = float(other.close("corr-sonnet")["cost_usd"])
+    assert haiku_cost < sonnet_cost

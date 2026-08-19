@@ -5,6 +5,7 @@ from __future__ import annotations
 from core.graph.upserts import (
     ClassRecord,
     ContainsRow,
+    EmbeddingRecord,
     FileRecord,
     FunctionRecord,
     MetaRecord,
@@ -20,6 +21,7 @@ from core.graph.upserts import (
     upsert_decorators,
     upsert_depends_on,
     upsert_docstrings,
+    upsert_embeddings,
     upsert_files,
     upsert_functions,
     upsert_import_depends_on,
@@ -287,3 +289,20 @@ def test_delete_file_subtree_uses_single_row_payload() -> None:
 
     assert cypher.startswith("UNWIND $rows AS row")
     assert rows == [{"path": "pkg/module.py"}]
+
+
+def test_upsert_embeddings_sets_vector_on_code_nodes() -> None:
+    cypher, rows = upsert_embeddings(
+        [
+            EmbeddingRecord(
+                qualified_name="fastapi.dependencies.utils.get_dependant",
+                embedding=[0.1, 0.2],
+                embedding_text="get_dependant docstring",
+            )
+        ]
+    )
+    assert "UNWIND $rows AS row" in cypher
+    assert "n.embedding = row.embedding" in cypher
+    assert "n.embedding_text = row.embedding_text" in cypher
+    assert rows[0]["qualified_name"] == "fastapi.dependencies.utils.get_dependant"
+    assert rows[0]["embedding"] == [0.1, 0.2]

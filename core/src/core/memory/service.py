@@ -98,6 +98,15 @@ class MemoryService:
         token_budget: int | None = None,
         recent_turns_to_keep: int | None = None,
     ) -> None:
+        """Open a SQLite-backed memory store.
+
+        Args:
+            llm_provider: Provider used to summarize folded turns.
+            db_path: SQLite path override.
+            cache_ttl_seconds: Response-cache TTL override.
+            token_budget: Context token budget override.
+            recent_turns_to_keep: Verbatim window size override.
+        """
         settings = MemorySettings.from_env()
         self._llm_provider = llm_provider
         self._db_path = db_path or settings.db_path
@@ -131,7 +140,13 @@ class MemoryService:
             log.info("memory.schema_ready", db_path=self._db_path)
 
     async def append_turn(self, session_id: str, role: str, content: str) -> None:
-        """Insert a new turn and trigger summarization when the budget is breached."""
+        """Insert a new turn and trigger summarization when the budget is breached.
+        
+        Args:
+            session_id: str.
+            role: str.
+            content: str.
+        """
         await self.initialize()
         created_at = _utc_now().isoformat()
         token_estimate = estimate_tokens(content)
@@ -165,7 +180,15 @@ class MemoryService:
         session_id: str,
         token_budget: int = 3000,
     ) -> ConversationContext:
-        """Return the rolling summary plus as many recent turns as fit the budget."""
+        """Return the rolling summary plus as many recent turns as fit the budget.
+        
+        Args:
+            session_id: str.
+            token_budget: int.
+
+        Returns:
+            ConversationContext.
+        """
         await self.initialize()
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -188,7 +211,17 @@ class MemoryService:
         return ConversationContext(summary=summary, recent_turns=chosen)
 
     async def summarize_session(self, session_id: str) -> str:
-        """Fold older turns into the rolling summary while keeping the last turns verbatim."""
+        """Fold older turns into the rolling summary while keeping the last turns verbatim.
+        
+        Args:
+            session_id: str.
+
+        Returns:
+            str.
+
+        Raises:
+            TypeError: See exception message.
+        """
         await self.initialize()
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -248,7 +281,14 @@ class MemoryService:
         return summary
 
     async def cache_get(self, cache_key: str) -> CachedResponse | None:
-        """Return a cached response if it has not expired; otherwise drop it."""
+        """Return a cached response if it has not expired; otherwise drop it.
+        
+        Args:
+            cache_key: str.
+
+        Returns:
+            CachedResponse | None.
+        """
         await self.initialize()
         cutoff = _utc_now() - timedelta(seconds=self._cache_ttl_seconds)
         async with aiosqlite.connect(self._db_path) as db:
@@ -278,7 +318,12 @@ class MemoryService:
             )
 
     async def cache_put(self, cache_key: str, response_json: Any) -> None:
-        """Store or replace an opaque cached JSON response."""
+        """Store or replace an opaque cached JSON response.
+        
+        Args:
+            cache_key: str.
+            response_json: Any.
+        """
         await self.initialize()
         created_at = _utc_now().isoformat()
         encoded = json.dumps(response_json)
@@ -385,7 +430,14 @@ class MemoryService:
 
 
 def estimate_tokens(text: str) -> int:
-    """Return a cheap, rough token estimate based on character count."""
+    """Return a cheap, rough token estimate based on character count.
+    
+    Args:
+        text: str.
+
+    Returns:
+        int.
+    """
     if not text:
         return 0
     return max(1, math.ceil(len(text) / 4))

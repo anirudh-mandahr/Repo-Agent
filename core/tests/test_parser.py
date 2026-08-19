@@ -32,7 +32,7 @@ def test_parse_sample_module_exactly() -> None:
         module="sample_module",
         content_hash=expected_hash,
         line_start=1,
-        line_end=38,
+        line_end=1,
         docstring=ParsedDocstring(
             text="Fixture module for indexer parser tests.",
             summary="Fixture module for indexer parser tests.",
@@ -135,7 +135,15 @@ def test_parse_sample_module_exactly() -> None:
         ],
         error=None,
     )
-    assert parsed == expected
+    parsed_dump = parsed.model_dump()
+    expected_dump = expected.model_dump()
+    for collection in ("classes", "functions", "methods"):
+        for item in parsed_dump[collection]:
+            assert item["source_summary"]
+            item["source_summary"] = ""
+        for item in expected_dump[collection]:
+            item["source_summary"] = ""
+    assert parsed_dump == expected_dump
 
 
 def test_parse_file_records_syntax_error_without_raising() -> None:
@@ -169,6 +177,56 @@ def test_parse_python_ast_accepts_path_or_code() -> None:
     assert parse_code("def ping() -> str:\n    return 'ok'\n").functions[0].name == "ping"
 
 
+def test_nested_function_calls_are_collected() -> None:
+    parsed = parse_code(
+        "\n".join(
+            [
+                "def outer() -> None:",
+                "    def inner() -> None:",
+                "        helper()",
+                "    inner()",
+            ]
+        )
+    )
+    assert parsed.error is None
+    assert parsed.functions[0].name == "outer"
+    assert "helper" in parsed.functions[0].calls
+    assert "inner" in parsed.functions[0].calls
+    assert any(call.callee == "helper" for call in parsed.calls)
+
+
+def test_type_checking_imports_are_collected() -> None:
+    parsed = parse_code(
+        "\n".join(
+            [
+                "from typing import TYPE_CHECKING",
+                "if TYPE_CHECKING:",
+                "    from collections.abc import Mapping",
+                "    import os",
+            ]
+        )
+    )
+    modules = {item.module for item in parsed.imports}
+    assert "typing" in modules
+    assert "collections.abc" in modules
+    assert "os" in modules
+
+
+def test_typing_type_checking_attribute_imports_are_collected() -> None:
+    parsed = parse_code(
+        "\n".join(
+            [
+                "import typing",
+                "if typing.TYPE_CHECKING:",
+                "    from collections.abc import Sequence",
+            ]
+        )
+    )
+    modules = {item.module for item in parsed.imports}
+    assert "typing" in modules
+    assert "collections.abc" in modules
+
+
 def test_extract_entities_emits_spec_nodes_and_relationships() -> None:
     extracted = extract_entities(str(SAMPLE), repo_root=FIXTURES)
     types = {item["type"] for item in extracted.entities}
@@ -200,3 +258,40 @@ def test_extract_entities_emits_spec_nodes_and_relationships() -> None:
     assert {"app.get", "staticmethod", "property"} <= decorators
     docs = [item for item in extracted.entities if item["type"] == "Docstring"]
     assert any(item["summary"] == "Load records." for item in docs)
+    modules = [item for item in extracted.entities if item["type"] == "Module"]
+    assert modules[0]["line_start"] == 1
+    assert modules[0]["line_end"] == 1
+    classes = [item for item in extracted.entities if item["type"] == "Class"]
+    worker = next(item for item in classes if item["name"] == "Worker")
+    assert worker["line_start"] == 17
+    assert worker["line_end"] == 27
+
+
+def test_module_span_is_header_not_file_length() -> None:
+    parsed = parse_code(
+        "\n".join(
+            [
+                '"""Module docs."""',
+                "",
+                "class Huge:",
+                "    pass",
+                "",
+                "def tail() -> None:",
+                "    return None",
+            ]
+        )
+    )
+    assert parsed.line_start == 1
+    assert parsed.line_end == 1
+    assert parsed.classes[0].line_start == 3
+    assert parsed.classes[0].line_end == 4
+    assert parsed.functions[0].line_start == 6
+    assert parsed.functions[0].line_end == 7
+
+
+def test_module_span_without_docstring_uses_leading_imports() -> None:
+    parsed = parse_code("import os\nimport sys\n\nclass Box:\n    pass\n")
+    assert parsed.line_start == 1
+    assert parsed.line_end == 2
+    assert parsed.classes[0].line_start == 4
+    assert parsed.classes[0].line_end == 5

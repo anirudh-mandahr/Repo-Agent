@@ -9,4 +9,4 @@ def test_agent_health_ok() -> None:
     status = agent_health("orchestrator")
     assert status.status == "ok"
     assert status.agent == "orchestrator"
-    assert status.model_dump() == {"status": "ok", "agent": "orchestrator", "detail": None}
+    assert status.model_dump(exclude_none=True) == {"status": "ok", "agent": "orchestrator"}
