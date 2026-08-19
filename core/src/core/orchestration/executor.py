@@ -271,7 +271,7 @@ def _default_snippet_range() -> tuple[int, int]:
     return (1, 120)
 
 
-def code_analyst_can_start_now(intent: QueryIntent) -> bool:
+def code_analyst_can_start_now(intent: QueryIntent, query: str = "") -> bool:
     """True when the analyst can run without waiting for graph_query.
 
     Pattern search needs no graph coordinates. Every other analyst tool
@@ -280,11 +280,12 @@ def code_analyst_can_start_now(intent: QueryIntent) -> bool:
 
     Args:
         intent: Routed query intent.
+        query: User query used to specialize mixed/comparison tool plans.
 
     Returns:
         Whether code_analyst work can overlap graph_query.
     """
-    tools = _tool_plan(intent.intent, "code_analyst")
+    tools = _tool_plan(intent.intent, "code_analyst", query)
     parallel = tools.get("parallel", ())
     if not parallel:
         return False
@@ -357,6 +358,8 @@ def _select_analysis_candidates(
             str(hit.get("tier") or ""),
             str(hit.get("file_path") or hit.get("filePath") or ""),
             float(hit.get("score") or 0.0),
+            name=str(hit.get("name") or ""),
+            qualified_name=str(hit.get("qualified_name") or ""),
         )
     )
     selected: list[dict[str, Any]] = []
@@ -397,8 +400,39 @@ def _pattern_name(query: str, entities: Sequence[str]) -> str:
     return "decorator"
 
 
-def _tool_plan(intent: QueryIntentIntent, agent: AgentName) -> dict[str, tuple[str, ...]]:
+def _tool_plan(
+    intent: QueryIntentIntent,
+    agent: AgentName,
+    query: str = "",
+) -> dict[str, tuple[str, ...]]:
+    if _wants_comparison(query) and intent in {"comparison", "mixed"}:
+        if agent == "graph_query":
+            return {
+                "first": ("find_entity",),
+                "parallel": _relationship_tools_for_query(query),
+            }
+        if agent == "code_analyst":
+            return {"first": (), "parallel": ("compare_implementations",)}
     return INTENT_TOOL_MAP.get(intent, {}).get(agent, {"first": (), "parallel": ()})
+
+
+def _wants_comparison(query: str) -> bool:
+    return "compare" in query.lower()
+
+
+def _relationship_tools_for_query(query: str) -> tuple[str, ...]:
+    """Relationship tools implied by the query, not the full mixed fan-out."""
+    lowered = query.lower()
+    tools: list[str] = []
+    if re.search(r"who depends|\bdependents?\b|\bdepends on them\b", lowered):
+        tools.append("get_dependents")
+    elif re.search(r"\bdepends on\b|\buses\b", lowered):
+        tools.append("get_dependencies")
+    if re.search(r"\bimports?\b", lowered):
+        tools.append("trace_imports")
+    if re.search(r"inherit|extends|subclass|who calls|\bcalled by\b", lowered):
+        tools.append("find_related")
+    return tuple(tools)
 
 
 def related_relationship_type(query: str) -> str | None:
@@ -507,7 +541,7 @@ async def run_plan(
         nonlocal graph_entities, graph_available, graph_hits, graph_extra, analysis_candidates
         try:
             entities = list(intent.entities or [])
-            tools = _tool_plan(intent.intent, "graph_query")
+            tools = _tool_plan(intent.intent, "graph_query", query)
             if not tools.get("first") and not tools.get("parallel"):
                 log.info(
                     "orchestrator.empty_tool_plan",
@@ -745,7 +779,7 @@ async def run_plan(
                     _resolved_name("", hit)
                     for hit in candidate_hits
                 ]
-            tools = _tool_plan(intent.intent, "code_analyst")
+            tools = _tool_plan(intent.intent, "code_analyst", query)
             parallel = tools.get("parallel", ())
             if not parallel:
                 log.info(
@@ -1052,7 +1086,7 @@ async def run_plan(
             graph_done.set()
 
     async def _run_code_maybe_wait(intent: QueryIntent) -> None:
-        if "graph_query" in planned_agents and not code_analyst_can_start_now(intent):
+        if "graph_query" in planned_agents and not code_analyst_can_start_now(intent, query):
             await graph_coords_ready.wait()
         await _run_code(intent)
 

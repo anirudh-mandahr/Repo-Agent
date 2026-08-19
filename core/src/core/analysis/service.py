@@ -35,7 +35,7 @@ from core.analysis.prompts import (
 from core.analysis.snippets import (
     PathTraversalError,
     cap_module_snippet_range,
-    get_snippet,
+    get_snippet_async,
     is_module_entity,
     repo_root_from_env,
     resolve_repo_path,
@@ -110,7 +110,7 @@ class CodeAnalystService:
                 qualified_name=qualified_name,
                 error=f"Entity not found: {qualified_name}",
             )
-        snippet = self._snippet_from_row(context)
+        snippet = await self._snippet_from_row(context)
         if snippet.error:
             return FunctionAnalysis(qualified_name=qualified_name, error=snippet.error)
         prompt = render_prompt(
@@ -148,7 +148,7 @@ class CodeAnalystService:
                 error=f"Entity not found: {qualified_name}",
             )
         context = rows[0]
-        snippet = self._snippet_from_row(context)
+        snippet = await self._snippet_from_row(context)
         if snippet.error:
             return ClassAnalysis(qualified_name=qualified_name, error=snippet.error)
         bases = _str_list(context.get("bases")) or _str_list(context.get("inherited_from"))
@@ -250,7 +250,7 @@ class CodeAnalystService:
             and self._is_path_traversal(path)
             and not qualified_name
         ):
-            return self._read_snippet(path, start or 1, end or start or 1, context=context)
+            return await self._read_snippet(path, start or 1, end or start or 1, context=context)
         if not path_ok or start is None or end is None:
             lookup_name = qualified_name or (path if path and not path_ok else None)
             if not lookup_name:
@@ -272,7 +272,7 @@ class CodeAnalystService:
                 start, end = cap_module_snippet_range(start, end)
         if not path or start is None or end is None:
             return SnippetResult(error="Missing file_path or line range")
-        return self._read_snippet(path, start, end, context=context)
+        return await self._read_snippet(path, start, end, context=context)
 
     async def explain_implementation(self, qualified_name: str) -> ImplementationExplanation:
         """Explain a function, method, or class using graph context and source.
@@ -285,7 +285,7 @@ class CodeAnalystService:
         """
         context = await self._function_context(qualified_name)
         if context is not None:
-            snippet = self._snippet_from_row(context)
+            snippet = await self._snippet_from_row(context)
             if snippet.error:
                 return ImplementationExplanation(
                     qualified_name=qualified_name,
@@ -320,7 +320,7 @@ class CodeAnalystService:
                 qualified_name=qualified_name,
                 error=f"Entity not found: {qualified_name}",
             )
-        snippet = self._snippet_from_row(class_context)
+        snippet = await self._snippet_from_row(class_context)
         if snippet.error:
             return ImplementationExplanation(
                 qualified_name=qualified_name,
@@ -370,8 +370,8 @@ class CodeAnalystService:
                 name_b=name_b,
                 error=f"Entity not found: {', '.join(missing)}",
             )
-        snippet_a = self._snippet_from_row(context_a)
-        snippet_b = self._snippet_from_row(context_b)
+        snippet_a = await self._snippet_from_row(context_a)
+        snippet_b = await self._snippet_from_row(context_b)
         for snippet in (snippet_a, snippet_b):
             if snippet.error:
                 return ImplementationComparison(
@@ -387,15 +387,15 @@ class CodeAnalystService:
                 "class_a": _str(context_a.get("class_name")),
                 "parameters_a": _format_parameters(context_a.get("parameters")),
                 "decorators_a": _bullets(_str_list(context_a.get("decorators"))),
-                "dependents_a": _bullets(_str_list(context_a.get("dependents"))),
-                "snippet_a": snippet_a.text,
+                "dependents_a": _bullets(_limited(_str_list(context_a.get("dependents")))),
+                "snippet_a": _clip_text(snippet_a.text),
                 "name_b": name_b,
                 "module_b": _str(context_b.get("module")),
                 "class_b": _str(context_b.get("class_name")),
                 "parameters_b": _format_parameters(context_b.get("parameters")),
                 "decorators_b": _bullets(_str_list(context_b.get("decorators"))),
-                "dependents_b": _bullets(_str_list(context_b.get("dependents"))),
-                "snippet_b": snippet_b.text,
+                "dependents_b": _bullets(_limited(_str_list(context_b.get("dependents")))),
+                "snippet_b": _clip_text(snippet_b.text),
             },
         )
         result = await self._complete(
@@ -432,7 +432,7 @@ class CodeAnalystService:
             return True
         return False
 
-    def _snippet_from_row(self, row: Mapping[str, Any], context: int = 5) -> SnippetResult:
+    async def _snippet_from_row(self, row: Mapping[str, Any], context: int = 5) -> SnippetResult:
         path = _str(row.get("file_path"))
         start = _opt_int(row.get("line_start"))
         end = _opt_int(row.get("line_end"))
@@ -440,9 +440,9 @@ class CodeAnalystService:
             return SnippetResult(error="Missing file_path or line range")
         if is_module_entity(row):
             start, end = cap_module_snippet_range(start, end)
-        return self._read_snippet(path, start, end, context=context)
+        return await self._read_snippet(path, start, end, context=context)
 
-    def _read_snippet(
+    async def _read_snippet(
         self,
         file_path: str,
         line_start: int,
@@ -450,7 +450,7 @@ class CodeAnalystService:
         context: int = 5,
     ) -> SnippetResult:
         try:
-            text = get_snippet(
+            text = await get_snippet_async(
                 file_path,
                 line_start,
                 line_end,

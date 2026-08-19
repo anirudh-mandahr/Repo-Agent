@@ -20,7 +20,10 @@ from core.querying.service import (
     READ_TIMEOUT_S,
     STATISTICS_TIMEOUT_S,
     GraphQueryService,
+    conceptual_entity_names,
     lucene_query,
+    path_name_affinity,
+    retrieval_sort_key,
 )
 
 
@@ -378,8 +381,13 @@ def test_retrieve_falls_through_to_fulltext_when_exact_misses() -> None:
     assert hit.tier == "fulltext"
     assert hit.qualified_name.endswith("get_dependant")
     assert hit.score == 4.2
-    assert "lucene_query" in client.queries[1][1]
-    assert " OR " in client.queries[1][1]["lucene_query"]
+    assert any("lucene_query" in params for _query, params, _timeout in client.queries)
+    lucene = next(
+        params["lucene_query"]
+        for _query, params, _timeout in client.queries
+        if "lucene_query" in params
+    )
+    assert " OR " in lucene
 
 
 def test_retrieve_skips_embeddings_when_flag_is_off() -> None:
@@ -569,6 +577,239 @@ def test_retrieve_dependency_injection_prefers_package_source() -> None:
         }
     )
     result = GraphQueryService(client).retrieve("Depends")
+    assert result.matches[0].file_path in {
+        "fastapi/dependencies/utils.py",
+        "fastapi/param_functions.py",
+    }
+
+
+def _hit(
+    *,
+    name: str,
+    qualified_name: str,
+    file_path: str,
+    labels: list[str] | None = None,
+    score: float = 1.0,
+) -> dict[str, object]:
+    return {
+        "labels": labels or ["Class"],
+        "name": name,
+        "qualified_name": qualified_name,
+        "file_path": file_path,
+        "line_start": 1,
+        "line_end": 8,
+        "score": score,
+    }
+
+
+def test_path_name_affinity_prefers_defining_module() -> None:
+    assert path_name_affinity("WebSocket", "fastapi/websockets.py") < path_name_affinity(
+        "WebSocket", "fastapi/routing.py"
+    )
+    assert path_name_affinity("CORSMiddleware", "fastapi/middleware/cors.py") < path_name_affinity(
+        "CORSMiddleware", "fastapi/applications.py"
+    )
+    assert path_name_affinity("TestClient", "fastapi/testclient.py") < path_name_affinity(
+        "TestClient", "fastapi/__init__.py"
+    )
+    assert path_name_affinity("JSONResponse", "fastapi/responses.py") == 0
+    assert path_name_affinity("HTMLResponse", "fastapi/responses.py") == 0
+
+
+def test_retrieval_sort_key_ranks_reexport_above_unrelated_and_tests() -> None:
+    local = retrieval_sort_key(
+        "exact",
+        "fastapi/websockets.py",
+        1.0,
+        name="WebSocket",
+        qualified_name="fastapi.websockets.WebSocket",
+    )
+    unrelated = retrieval_sort_key(
+        "exact",
+        "fastapi/routing.py",
+        1.0,
+        name="WebSocket",
+        qualified_name="fastapi.routing.WebSocket",
+    )
+    test_hit = retrieval_sort_key(
+        "exact",
+        "tests/test_ws.py",
+        9.0,
+        name="WebSocket",
+        qualified_name="tests.test_ws.WebSocket",
+    )
+    assert local < unrelated < test_hit
+
+
+def test_conceptual_entity_names_covers_dependency_resolution() -> None:
+    names = conceptual_entity_names("How does dependency resolution work in the codebase")
+    assert names == ["Depends", "get_dependant", "solve_dependencies"]
+    assert conceptual_entity_names("What is WebSocket?") == []
+
+
+def test_retrieve_reexport_ranks_websocket_module_above_imports_and_tests() -> None:
+    client = FakeClient(
+        by_query={
+            "n.name = $name OR n.qualified_name = $name": [
+                _hit(
+                    name="WebSocket",
+                    qualified_name="tests.test_ws.WebSocket",
+                    file_path="tests/test_ws.py",
+                )
+            ],
+            "$name IN i.names": [
+                _hit(
+                    name="WebSocket",
+                    qualified_name="fastapi.WebSocket",
+                    file_path="fastapi/__init__.py",
+                ),
+                _hit(
+                    name="WebSocket",
+                    qualified_name="fastapi.routing.WebSocket",
+                    file_path="fastapi/routing.py",
+                ),
+                _hit(
+                    name="WebSocket",
+                    qualified_name="fastapi.websockets.WebSocket",
+                    file_path="fastapi/websockets.py",
+                ),
+            ],
+            "db.index.fulltext.queryNodes": [],
+        }
+    )
+    result = GraphQueryService(client).retrieve("WebSocket")
+    assert result.matches[0].file_path == "fastapi/websockets.py"
+    assert result.matches[0].name == "WebSocket"
+
+
+def test_retrieve_reexport_ranks_corsmiddleware_local_module() -> None:
+    client = FakeClient(
+        by_query={
+            "n.name = $name OR n.qualified_name = $name": [],
+            "$name IN i.names": [
+                _hit(
+                    name="CORSMiddleware",
+                    qualified_name="fastapi.CORSMiddleware",
+                    file_path="fastapi/__init__.py",
+                ),
+                _hit(
+                    name="CORSMiddleware",
+                    qualified_name="fastapi.middleware.cors.CORSMiddleware",
+                    file_path="fastapi/middleware/cors.py",
+                ),
+            ],
+            "db.index.fulltext.queryNodes": [],
+        }
+    )
+    result = GraphQueryService(client).retrieve("CORSMiddleware")
+    assert result.matches[0].file_path == "fastapi/middleware/cors.py"
+
+
+def test_retrieve_reexport_ranks_testclient_local_module() -> None:
+    client = FakeClient(
+        by_query={
+            "n.name = $name OR n.qualified_name = $name": [
+                _hit(
+                    name="TestClient",
+                    qualified_name="tests.test_starlette_testclient.TestClient",
+                    file_path="tests/test_starlette_testclient.py",
+                )
+            ],
+            "$name IN i.names": [
+                _hit(
+                    name="TestClient",
+                    qualified_name="fastapi.testclient.TestClient",
+                    file_path="fastapi/testclient.py",
+                )
+            ],
+            "db.index.fulltext.queryNodes": [],
+        }
+    )
+    result = GraphQueryService(client).retrieve("TestClient")
+    assert result.matches[0].file_path == "fastapi/testclient.py"
+
+
+def test_retrieve_reexport_ranks_json_and_html_response_module() -> None:
+    client = FakeClient(
+        by_query={
+            "n.name = $name OR n.qualified_name = $name": [],
+            "$name IN i.names": [
+                _hit(
+                    name="JSONResponse",
+                    qualified_name="fastapi.responses.JSONResponse",
+                    file_path="fastapi/responses.py",
+                ),
+                _hit(
+                    name="HTMLResponse",
+                    qualified_name="fastapi.routing.HTMLResponse",
+                    file_path="fastapi/routing.py",
+                ),
+            ],
+            "db.index.fulltext.queryNodes": [],
+        }
+    )
+    json_hits = GraphQueryService(client).retrieve("JSONResponse")
+    html_client = FakeClient(
+        by_query={
+            "n.name = $name OR n.qualified_name = $name": [],
+            "$name IN i.names": [
+                _hit(
+                    name="HTMLResponse",
+                    qualified_name="fastapi.responses.HTMLResponse",
+                    file_path="fastapi/responses.py",
+                ),
+                _hit(
+                    name="HTMLResponse",
+                    qualified_name="fastapi.HTMLResponse",
+                    file_path="fastapi/__init__.py",
+                ),
+            ],
+            "db.index.fulltext.queryNodes": [],
+        }
+    )
+    html_hits = GraphQueryService(html_client).retrieve("HTMLResponse")
+    assert json_hits.matches[0].file_path == "fastapi/responses.py"
+    assert html_hits.matches[0].file_path == "fastapi/responses.py"
+
+
+def test_retrieve_dependency_resolution_hits_utils_and_param_functions() -> None:
+    client = FakeClient(
+        by_query={
+            "n.name = $name OR n.qualified_name = $name": [
+                _hit(
+                    name="Depends",
+                    qualified_name="tests.test_dependency_duplicates.Depends",
+                    file_path="tests/test_dependency_duplicates.py",
+                    labels=["Function"],
+                ),
+                _hit(
+                    name="Depends",
+                    qualified_name="fastapi.param_functions.Depends",
+                    file_path="fastapi/param_functions.py",
+                    labels=["Function"],
+                ),
+                _hit(
+                    name="get_dependant",
+                    qualified_name="fastapi.dependencies.utils.get_dependant",
+                    file_path="fastapi/dependencies/utils.py",
+                    labels=["Function"],
+                ),
+                _hit(
+                    name="solve_dependencies",
+                    qualified_name="fastapi.dependencies.utils.solve_dependencies",
+                    file_path="fastapi/dependencies/utils.py",
+                    labels=["Function"],
+                ),
+            ],
+            "db.index.fulltext.queryNodes": [],
+        }
+    )
+    result = GraphQueryService(client).retrieve(
+        "How does dependency resolution work in the codebase"
+    )
+    paths = {hit.file_path for hit in result.matches}
+    assert "fastapi/dependencies/utils.py" in paths
+    assert "fastapi/param_functions.py" in paths
     assert result.matches[0].file_path in {
         "fastapi/dependencies/utils.py",
         "fastapi/param_functions.py",

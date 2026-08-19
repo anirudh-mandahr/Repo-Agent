@@ -39,16 +39,21 @@ class StubProvider:
         responses: Sequence[Any] | None = None,
         *,
         stream_chunk_delay_s: float = 0.0,
+        delay_per_prompt_token_s: float = 0.0,
     ) -> None:
         """Queue canned completions for tests.
 
         Args:
             responses: FIFO of text, mappings, or models to return.
             stream_chunk_delay_s: Optional delay between streamed chunks.
+            delay_per_prompt_token_s: When ``purpose`` is ``synthesis``, sleep
+                this many seconds per estimated prompt token before completing.
+                Models synthesis latency that scales with evidence volume.
         """
         self.calls: list[RecordedCall] = []
         self._queue: list[Any] = list(responses or [])
         self._stream_chunk_delay_s = stream_chunk_delay_s
+        self._delay_per_prompt_token_s = delay_per_prompt_token_s
 
     def enqueue(self, *responses: Any) -> None:
         """Append canned responses to the FIFO queue.
@@ -87,6 +92,11 @@ class StubProvider:
         _ = max_tokens
         _ = agent
         _ = temperature
+
+        if purpose == "synthesis" and self._delay_per_prompt_token_s > 0:
+            prompt = "\n".join(message.content for message in messages)
+            tokens = max(1, (len(prompt) + 3) // 4)
+            await asyncio.sleep(tokens * self._delay_per_prompt_token_s)
 
         async def invoke(attempt_messages: list[Message]) -> tuple[Any, TokenUsage]:
             self.calls.append(

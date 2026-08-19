@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from time import monotonic
 from typing import Any, Literal
 
@@ -10,6 +10,7 @@ from core.exceptions import AgentUnavailableError, CircuitBreakerOpenError
 from core.gateway import OrchestratorGatewayClient
 from core.health import HealthStatus
 from core.logging import get_logger
+from core.mcp.streaming import progress_callback_for_stream
 from core.memory import ConversationContext
 from core.orchestration.models import ExecutionPlan, QueryIntent
 from core.resilience.circuit_breaker import CircuitBreakerRegistry
@@ -165,14 +166,32 @@ class GatewayOrchestratorClient(OrchestratorGatewayClient):
         session_id: str,
         *,
         correlation_id: str,
+        on_token: Callable[[str], Awaitable[None]] | None = None,
+        on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
-        payload = await self._pool.call(
-            "orchestrator",
-            "handle_query",
-            {"query": query, "session_id": session_id},
-            correlation_id=correlation_id,
-            timeout_s=self._chat_timeout_s,
-        )
+        progress_callback = None
+        if on_token is not None or on_event is not None:
+            progress_callback = progress_callback_for_stream(
+                on_token=on_token,
+                on_event=on_event,
+            )
+        if progress_callback is not None:
+            payload = await self._pool.call(
+                "orchestrator",
+                "handle_query",
+                {"query": query, "session_id": session_id},
+                correlation_id=correlation_id,
+                timeout_s=self._chat_timeout_s,
+                progress_callback=progress_callback,
+            )
+        else:
+            payload = await self._pool.call(
+                "orchestrator",
+                "handle_query",
+                {"query": query, "session_id": session_id},
+                correlation_id=correlation_id,
+                timeout_s=self._chat_timeout_s,
+            )
         if not isinstance(payload, dict):
             return {"answer": str(payload), "metadata": {}}
         return payload

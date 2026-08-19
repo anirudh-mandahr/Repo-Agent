@@ -11,6 +11,7 @@ import pytest
 
 from core.exceptions import AgentUnavailableError
 from core.health import HealthStatus
+from core.mcp.streaming import encode_stream_event
 from core.memory import ConversationContext
 from core.orchestration.models import ExecutionPlan, QueryIntent
 from core.resilience.circuit_breaker import CircuitBreakerRegistry
@@ -299,7 +300,33 @@ async def test_specialist_clients_forward_tools() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_query_non_dict_payload() -> None:
+async def test_handle_query_forwards_progress_to_on_token() -> None:
+    class _Pool:
+        async def call(
+            self,
+            agent: str,
+            tool: str,
+            arguments: dict[str, Any] | None,
+            *,
+            correlation_id: str,
+            timeout_s: float,
+            retry_count: int = 0,
+            progress_callback: Any | None = None,
+        ) -> dict[str, Any]:
+            _ = agent, tool, arguments, correlation_id, timeout_s, retry_count
+            if progress_callback is not None:
+                await progress_callback(1.0, None, encode_stream_event("token", chunk="Hi"))
+            return {"answer": "Hi", "metadata": {}}
+
+    tokens: list[str] = []
+
+    async def on_token(chunk: str) -> None:
+        tokens.append(chunk)
+
+    client = GatewayOrchestratorClient(GatewaySettings(), _Pool())  # type: ignore[arg-type]
+    payload = await client.handle_query("q", "s", correlation_id="c", on_token=on_token)
+    assert payload["answer"] == "Hi"
+    assert tokens == ["Hi"]
     class _Pool:
         async def call(self, *args: Any, **kwargs: Any) -> str:
             _ = args, kwargs

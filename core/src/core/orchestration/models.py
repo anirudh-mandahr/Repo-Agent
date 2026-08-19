@@ -113,6 +113,7 @@ class SynthesisResult(BaseModel):
 
     answer: str
     evidence_only: bool = False
+    partial: bool = False
     degraded_reason: str | None = None
     prompt_truncated: PromptTruncation | None = None
     estimated_tokens: int = 0

@@ -21,10 +21,13 @@ from core.exceptions import (
 )
 from core.gateway import ChatEvent, ChatGatewayService, GatewayDependencies
 from core.health import HealthStatus
+from core.mcp.streaming import encode_stream_event
 from core.orchestration.fallback import EVIDENCE_ONLY_HEADER
 from core.orchestration.service import OrchestratorService
+from core.resilience.session_pool import AgentSessionPool
 from core.settings import GatewaySettings, OrchestratorSettings
 from gateway.app import _run_index_job, create_app
+from gateway.mcp_client import GatewayOrchestratorClient
 
 
 class _StubChatService:
@@ -451,6 +454,163 @@ def test_chat_gateway_surfaces_tools_invoked() -> None:
     assert result.routing["agents"] == ["graph_query"]
 
 
+@pytest.mark.asyncio
+async def test_gateway_emits_answer_before_orchestrator_call_completes() -> None:
+    released = asyncio.Event()
+    call_started = asyncio.Event()
+    saw_answer = asyncio.Event()
+
+    class _Session:
+        async def call_tool(
+            self,
+            name: str,
+            arguments: Any = None,
+            *,
+            meta: Any = None,
+            progress_callback: Any = None,
+        ) -> dict[str, Any]:
+            _ = name, arguments, meta
+            if progress_callback is not None:
+                await progress_callback(
+                    1.0,
+                    None,
+                    encode_stream_event("token", chunk="Hel"),
+                )
+            call_started.set()
+            await released.wait()
+            return {
+                "answer": "Hello",
+                "metadata": {
+                    "routing_mode": "rules",
+                    "cached": False,
+                    "degraded": False,
+                    "partial": False,
+                    "tokens": {
+                        "total": 1,
+                        "prompt": 1,
+                        "completion": 0,
+                        "llm_calls": 1,
+                    },
+                    "tools_invoked": ["graph_query.find_entity"],
+                },
+            }
+
+        async def aclose(self) -> None:
+            return None
+
+    async def opener(agent: str) -> _Session:
+        _ = agent
+        return _Session()
+
+    settings = _settings()
+    pool = AgentSessionPool({"orchestrator": "http://orchestrator/mcp"}, open_session=opener)
+    deps = GatewayDependencies(
+        orchestrator=GatewayOrchestratorClient(settings, pool),
+        specialists=_StubSpecialists(),
+        gateway_settings=settings,
+        orchestrator_settings=OrchestratorSettings(),
+    )
+    events: list[ChatEvent] = []
+
+    async def consume() -> None:
+        async for event in ChatGatewayService(deps).stream("What is FastAPI?", "s", "c"):
+            events.append(event)
+            if event.type == "answer":
+                saw_answer.set()
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(call_started.wait(), timeout=1.0)
+    await asyncio.wait_for(saw_answer.wait(), timeout=1.0)
+    assert task.done() is False
+    assert [event.type for event in events] == ["answer"]
+    assert events[0].data["chunk"] == "Hel"
+    released.set()
+    await asyncio.wait_for(task, timeout=1.0)
+    assert events[-1].type == "done"
+    await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gateway_post_hoc_chunks_when_progress_never_arrives() -> None:
+    class _Orch:
+        async def handle_query(
+            self,
+            query: str,
+            session_id: str,
+            *,
+            correlation_id: str,
+            on_token: Any | None = None,
+            on_event: Any | None = None,
+        ) -> dict[str, Any]:
+            _ = query, session_id, correlation_id, on_token, on_event
+            return {
+                "answer": "Hello world",
+                "metadata": {
+                    "routing_mode": "rules",
+                    "cached": False,
+                    "degraded": False,
+                    "tokens": {"total": 1, "prompt": 1, "completion": 0, "llm_calls": 1},
+                    "tools_invoked": ["graph_query.find_entity"],
+                },
+            }
+
+    deps = GatewayDependencies(
+        orchestrator=_Orch(),  # type: ignore[arg-type]
+        specialists=_StubSpecialists(),
+        gateway_settings=_settings(),
+        orchestrator_settings=OrchestratorSettings(),
+    )
+    events = [
+        event async for event in ChatGatewayService(deps).stream("What is FastAPI?", "s", "c")
+    ]
+    types = [event.type for event in events]
+    assert types[0] == "routing"
+    assert "answer" in types
+    assert types[-1] == "done"
+    chunks = [event.data.get("chunk") for event in events if event.type == "answer"]
+    assert "".join(str(chunk) for chunk in chunks) == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_done_event_includes_memory_and_graph_statistics_flags() -> None:
+    class _Orch:
+        async def handle_query(
+            self,
+            query: str,
+            session_id: str,
+            *,
+            correlation_id: str,
+            on_token: Any | None = None,
+            on_event: Any | None = None,
+        ) -> dict[str, Any]:
+            _ = query, session_id, correlation_id, on_token, on_event
+            return {
+                "answer": "Hello world",
+                "metadata": {
+                    "routing_mode": "rules",
+                    "cached": False,
+                    "degraded": False,
+                    "memory_available": False,
+                    "graph_statistics_available": False,
+                    "tokens": {"total": 1, "prompt": 1, "completion": 0, "llm_calls": 1},
+                    "tools_invoked": ["graph_query.find_entity"],
+                },
+            }
+
+    deps = GatewayDependencies(
+        orchestrator=_Orch(),  # type: ignore[arg-type]
+        specialists=_StubSpecialists(),
+        gateway_settings=_settings(),
+        orchestrator_settings=OrchestratorSettings(),
+    )
+    events = [
+        event async for event in ChatGatewayService(deps).stream("What is FastAPI?", "s", "c")
+    ]
+    done = next(event for event in events if event.type == "done")
+    assert done.data["memory_available"] is False
+    assert done.data["graph_statistics_available"] is False
+
+
 def test_chat_gateway_raises_when_orchestrator_unavailable() -> None:
     class _Orch:
         async def handle_query(
@@ -553,6 +713,69 @@ def test_chat_http_synthesis_timeout_returns_200_evidence_only() -> None:
     assert body["done"]["evidence_only"] is True
     assert body["done"]["degraded_reason"] == "TimeoutError"
     assert EVIDENCE_ONLY_HEADER in body["answer"]
+
+
+def test_chat_sse_and_ws_partial_synthesis_surfaces_partial_done() -> None:
+    class _PartialThenHang:
+        async def stream(self, *args: object, **kwargs: object) -> Any:
+            _ = args, kwargs
+            yield "FastAPI subclasses Starlette and ", None
+            yield "APIRouter groups path operations.", None
+            await asyncio.sleep(5)
+
+    deps = GatewayDependencies(
+        orchestrator=_LocalFailingOrchestrator(  # type: ignore[arg-type]
+            _PartialThenHang(),
+            settings=OrchestratorSettings(
+                routing_strategy="rules_first",
+                synthesis_timeout_s=0.05,
+            ),
+        ),
+        specialists=_StubSpecialists(),
+        gateway_settings=_settings(),
+        orchestrator_settings=OrchestratorSettings(routing_strategy="rules_first"),
+    )
+    app = create_app(_settings(), deps=deps)
+    client = TestClient(app, raise_server_exceptions=False)
+    retained = "FastAPI subclasses Starlette"
+
+    with client.stream(
+        "POST",
+        "/api/chat",
+        json={"message": "What is the FastAPI class?", "stream": True},
+    ) as response:
+        assert response.status_code == 200
+        sse_payloads: list[dict[str, Any]] = []
+        for line in response.iter_lines():
+            if line.startswith("data:"):
+                sse_payloads.append(json.loads(line.split(":", 1)[1].strip()))
+    sse_answer = "".join(
+        str(item.get("chunk") or "") for item in sse_payloads if item.get("type") == "answer"
+    )
+    sse_done = next(item for item in sse_payloads if item.get("type") == "done")
+    assert sse_done["partial"] is True
+    assert retained in sse_answer
+    assert EVIDENCE_ONLY_HEADER not in sse_answer
+
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"message": "What is the FastAPI class?"})
+        ws_events: list[dict[str, Any]] = []
+        for _ in range(32):
+            event = ws.receive_json()
+            ws_events.append(event)
+            if event["type"] == "done":
+                break
+        else:
+            raise AssertionError("websocket stream ended without a done event")
+    ws_answer = "".join(
+        str(event.get("data", {}).get("chunk") or "")
+        for event in ws_events
+        if event.get("type") == "answer"
+    )
+    ws_done = next(event for event in ws_events if event.get("type") == "done")
+    assert ws_done["data"]["partial"] is True
+    assert retained in ws_answer
+    assert EVIDENCE_ONLY_HEADER not in ws_answer
 
 
 def test_chat_http_leaked_synthesis_error_returns_503() -> None:

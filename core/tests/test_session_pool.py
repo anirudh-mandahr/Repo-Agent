@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from typing import Any
 
@@ -72,6 +73,59 @@ async def test_pooled_sessions_reused_across_calls_in_one_query() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pool_forwards_optional_progress_callback() -> None:
+    seen: list[str] = []
+
+    class _StreamingSession:
+        async def call_tool(
+            self,
+            name: str,
+            arguments: Mapping[str, Any] | None = None,
+            *,
+            meta: dict[str, Any] | None = None,
+            progress_callback: Any | None = None,
+        ) -> dict[str, str]:
+            _ = name, arguments, meta
+            if progress_callback is not None:
+                await progress_callback(1.0, None, "live")
+            return {"ok": "yes"}
+
+        async def aclose(self) -> None:
+            return None
+
+    async def opener(agent: str) -> _StreamingSession:
+        _ = agent
+        return _StreamingSession()
+
+    async def _progress(progress: float, total: float | None, message: str | None) -> None:
+        _ = progress, total
+        if message:
+            seen.append(message)
+
+    pool = AgentSessionPool({"orchestrator": "http://orch"}, open_session=opener)
+    without = await pool.call(
+        "orchestrator",
+        "health",
+        {},
+        correlation_id="c1",
+        timeout_s=1.0,
+    )
+    assert without == {"ok": "yes"}
+    assert seen == []
+    with_stream = await pool.call(
+        "orchestrator",
+        "handle_query",
+        {},
+        correlation_id="c1",
+        timeout_s=1.0,
+        progress_callback=_progress,
+    )
+    assert with_stream == {"ok": "yes"}
+    assert seen == ["live"]
+    await pool.aclose()
+
+
+@pytest.mark.asyncio
 async def test_pool_drops_session_after_failure_and_reopens() -> None:
     opens = 0
 
@@ -123,3 +177,63 @@ async def test_closed_pool_rejects_calls() -> None:
             correlation_id="q1",
             timeout_s=1.0,
         )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_calls_to_same_agent_overlap() -> None:
+    in_flight = 0
+    max_in_flight = 0
+    ready = asyncio.Event()
+    entered = 0
+
+    class _SlowSession:
+        async def call_tool(
+            self,
+            name: str,
+            arguments: Mapping[str, Any] | None = None,
+            *,
+            meta: dict[str, Any] | None = None,
+        ) -> dict[str, bool]:
+            nonlocal in_flight, max_in_flight, entered
+            _ = name, arguments, meta
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            entered += 1
+            if entered >= 2:
+                ready.set()
+            await asyncio.wait_for(ready.wait(), timeout=1.0)
+            await asyncio.sleep(0.01)
+            in_flight -= 1
+            return {"ok": True}
+
+        async def aclose(self) -> None:
+            return None
+
+    async def opener(agent: str) -> _SlowSession:
+        _ = agent
+        return _SlowSession()
+
+    pool = AgentSessionPool(
+        {"graph_query": "http://graph"},
+        open_session=opener,
+        max_sessions_per_agent=2,
+    )
+    await asyncio.gather(
+        pool.call(
+            "graph_query",
+            "find_entity",
+            {},
+            correlation_id="c1",
+            timeout_s=2.0,
+        ),
+        pool.call(
+            "graph_query",
+            "get_dependents",
+            {},
+            correlation_id="c2",
+            timeout_s=2.0,
+        ),
+    )
+    assert max_in_flight == 2
+    assert pool.open_counts["graph_query"] == 2
+    await pool.aclose()

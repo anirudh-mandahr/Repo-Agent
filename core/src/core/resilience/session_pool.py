@@ -1,8 +1,9 @@
-"""Reusable MCP session per upstream agent."""
+"""Bounded pool of reusable MCP sessions per upstream agent."""
 
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol
 
@@ -14,7 +15,24 @@ from .retry import await_with_timeout_retry
 
 log = get_logger(__name__)
 
+DEFAULT_MAX_SESSIONS_PER_AGENT = 4
 SessionOpener = Callable[[str], Awaitable["ToolSession"]]
+
+
+class ProgressCallback(Protocol):
+    """MCP ``call_tool(..., progress_callback=)`` signature."""
+
+    async def __call__(
+        self, progress: float, total: float | None, message: str | None
+    ) -> None:
+        """Handle one progress notification.
+
+        Args:
+            progress: Current progress value.
+            total: Optional total, or ``None`` when unknown.
+            message: Optional payload (stream events are JSON in this field).
+        """
+        ...
 
 
 class ToolSession(Protocol):
@@ -26,6 +44,7 @@ class ToolSession(Protocol):
         arguments: Mapping[str, Any] | None = None,
         *,
         meta: dict[str, Any] | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> Any:
         """Invoke a tool on the live session."""
         ...
@@ -35,8 +54,127 @@ class ToolSession(Protocol):
         ...
 
 
+def _resolve_max_sessions(explicit: int | None) -> int:
+    if explicit is not None:
+        return max(1, explicit)
+    raw = os.environ.get("MCP_SESSION_POOL_SIZE", "").strip()
+    if not raw:
+        return DEFAULT_MAX_SESSIONS_PER_AGENT
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_MAX_SESSIONS_PER_AGENT
+
+
+class _AgentSessionBucket:
+    """Idle-queue of up to ``max_size`` live sessions for one agent."""
+
+    def __init__(
+        self,
+        agent: str,
+        max_size: int,
+        opener: Callable[[], Awaitable[ToolSession]],
+    ) -> None:
+        self._agent = agent
+        self._max_size = max_size
+        self._opener = opener
+        self._idle: list[ToolSession] = []
+        self._live: list[ToolSession] = []
+        self._size = 0
+        self._closed = False
+        self._cond = asyncio.Condition()
+
+    async def acquire(self, *, correlation_id: str) -> ToolSession:
+        created = False
+        async with self._cond:
+            while True:
+                if self._closed:
+                    raise AgentUnavailableError(
+                        agent=self._agent,
+                        correlation_id=correlation_id,
+                        message=f"mcp pool closed; cannot acquire session for {self._agent}",
+                    )
+                if self._idle:
+                    return self._idle.pop()
+                if self._size < self._max_size:
+                    self._size += 1
+                    created = True
+                    break
+                await self._cond.wait()
+        if created:
+            try:
+                session = await self._opener()
+            except Exception:
+                async with self._cond:
+                    self._size = max(0, self._size - 1)
+                    self._cond.notify()
+                raise
+            async with self._cond:
+                if self._closed:
+                    self._size = max(0, self._size - 1)
+                    self._cond.notify()
+                    try:
+                        await session.aclose()
+                    except Exception as exc:  # pragma: no cover - defensive
+                        log.warning(
+                            "mcp.pool.close_failed",
+                            agent=self._agent,
+                            error=str(exc),
+                        )
+                    raise AgentUnavailableError(
+                        agent=self._agent,
+                        correlation_id=correlation_id,
+                        message=f"mcp pool closed; cannot acquire session for {self._agent}",
+                    )
+                self._live.append(session)
+            return session
+        raise AgentUnavailableError(
+            agent=self._agent,
+            correlation_id=correlation_id,
+            message=f"mcp pool failed to acquire session for {self._agent}",
+        )
+
+    async def release(self, session: ToolSession) -> None:
+        async with self._cond:
+            if self._closed:
+                close_after = True
+            else:
+                self._idle.append(session)
+                self._cond.notify()
+                close_after = False
+        if close_after:
+            await self._close_quietly(session)
+
+    async def drop(self, session: ToolSession) -> None:
+        async with self._cond:
+            if session in self._live:
+                self._live.remove(session)
+            if session in self._idle:
+                self._idle.remove(session)
+            self._size = max(0, self._size - 1)
+            self._cond.notify()
+        await self._close_quietly(session)
+
+    async def aclose(self) -> None:
+        async with self._cond:
+            self._closed = True
+            sessions = list(self._live)
+            self._live.clear()
+            self._idle.clear()
+            self._size = 0
+            self._cond.notify_all()
+        for session in sessions:
+            await self._close_quietly(session)
+
+    async def _close_quietly(self, session: ToolSession) -> None:
+        try:
+            await session.aclose()
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("mcp.pool.close_failed", agent=self._agent, error=str(exc))
+
+
 class AgentSessionPool:
-    """One reused session per agent, with per-agent locking and a circuit breaker."""
+    """Bounded pool of reused MCP sessions per agent, with a circuit breaker."""
 
     def __init__(
         self,
@@ -45,6 +183,7 @@ class AgentSessionPool:
         open_session: SessionOpener | None = None,
         breakers: CircuitBreakerRegistry | None = None,
         clock: Callable[[], float] | None = None,
+        max_sessions_per_agent: int | None = None,
     ) -> None:
         """Create a pool.
 
@@ -53,6 +192,8 @@ class AgentSessionPool:
             open_session: Optional factory used in tests; defaults to streamable HTTP.
             breakers: Optional shared circuit-breaker registry.
             clock: Monotonic clock forwarded to a default registry.
+            max_sessions_per_agent: Concurrent live sessions per agent. ``None``
+                reads ``MCP_SESSION_POOL_SIZE`` (default 4).
         """
         self._urls = dict(urls or {})
         self._open_session = open_session
@@ -62,8 +203,8 @@ class AgentSessionPool:
             from time import monotonic
 
             self.breakers = CircuitBreakerRegistry(clock=clock or monotonic)
-        self._sessions: dict[str, ToolSession] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._max_sessions_per_agent = _resolve_max_sessions(max_sessions_per_agent)
+        self._buckets: dict[str, _AgentSessionBucket] = {}
         self._open_counts: dict[str, int] = {}
         self._call_counts: dict[str, int] = {}
         self._closed = False
@@ -95,6 +236,7 @@ class AgentSessionPool:
         correlation_id: str,
         timeout_s: float,
         retry_count: int = 0,
+        progress_callback: ProgressCallback | None = None,
     ) -> Any:
         """Call ``tool`` on ``agent`` using the pooled session.
 
@@ -105,6 +247,8 @@ class AgentSessionPool:
             correlation_id: Request correlation id.
             timeout_s: Per-attempt timeout.
             retry_count: Transient retries after the first attempt.
+            progress_callback: Optional MCP progress consumer. Omitted for
+                callers that do not negotiate streaming.
 
         Returns:
             Parsed tool result.
@@ -122,7 +266,13 @@ class AgentSessionPool:
         breaker = self.breakers.get(agent)
 
         async def _once() -> Any:
-            return await self._call_locked(agent, tool, arguments, correlation_id)
+            return await self._call_with_session(
+                agent,
+                tool,
+                arguments,
+                correlation_id,
+                progress_callback=progress_callback,
+            )
 
         from core.observability.metrics import observe_request
         from core.observability.tracing import start_span
@@ -155,40 +305,61 @@ class AgentSessionPool:
     async def aclose(self) -> None:
         """Close every live session."""
         self._closed = True
-        agents = list(self._sessions)
-        for agent in agents:
-            await self._drop(agent)
-        self._sessions.clear()
+        buckets = list(self._buckets.values())
+        self._buckets.clear()
+        for bucket in buckets:
+            await bucket.aclose()
 
-    async def _call_locked(
+    def _bucket(self, agent: str) -> _AgentSessionBucket:
+        existing = self._buckets.get(agent)
+        if existing is not None:
+            return existing
+        bucket = _AgentSessionBucket(
+            agent,
+            self._max_sessions_per_agent,
+            lambda: self._open_and_count(agent),
+        )
+        self._buckets[agent] = bucket
+        return bucket
+
+    async def _call_with_session(
         self,
         agent: str,
         tool: str,
         arguments: Mapping[str, Any] | None,
         correlation_id: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> Any:
-        lock = self._locks.setdefault(agent, asyncio.Lock())
-        async with lock:
-            session = await self._ensure(agent)
-            self._call_counts[agent] = self._call_counts.get(agent, 0) + 1
-            try:
-                from core.observability.tracing import inject_trace_carrier
+        bucket = self._bucket(agent)
+        session = await bucket.acquire(correlation_id=correlation_id)
+        self._call_counts[agent] = self._call_counts.get(agent, 0) + 1
+        try:
+            from core.observability.tracing import inject_trace_carrier
 
-                return await session.call_tool(
+            meta = inject_trace_carrier(correlation_id)
+            arguments_dict = dict(arguments or {})
+            if progress_callback is not None:
+                result = await session.call_tool(
                     tool,
-                    arguments=dict(arguments or {}),
-                    meta=inject_trace_carrier(correlation_id),
+                    arguments=arguments_dict,
+                    meta=meta,
+                    progress_callback=progress_callback,
                 )
-            except Exception:
-                await self._drop(agent)
-                raise
+            else:
+                result = await session.call_tool(
+                    tool,
+                    arguments=arguments_dict,
+                    meta=meta,
+                )
+        except Exception:
+            await bucket.drop(session)
+            raise
+        await bucket.release(session)
+        return result
 
-    async def _ensure(self, agent: str) -> ToolSession:
-        existing = self._sessions.get(agent)
-        if existing is not None:
-            return existing
+    async def _open_and_count(self, agent: str) -> ToolSession:
         session = await self._open(agent)
-        self._sessions[agent] = session
         self._open_counts[agent] = self._open_counts.get(agent, 0) + 1
         log.info(
             "mcp.pool.session_open",
@@ -209,15 +380,6 @@ class AgentSessionPool:
         from core.mcp.client import open_streamable_http_session
 
         return await open_streamable_http_session(url)
-
-    async def _drop(self, agent: str) -> None:
-        session = self._sessions.pop(agent, None)
-        if session is None:
-            return
-        try:
-            await session.aclose()
-        except Exception as exc:  # pragma: no cover - defensive
-            log.warning("mcp.pool.close_failed", agent=agent, error=str(exc))
 
 
 def _parse_tool_result(agent: str, tool: str, result: Any, correlation_id: str) -> Any:

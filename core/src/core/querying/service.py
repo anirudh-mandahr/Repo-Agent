@@ -24,6 +24,7 @@ from core.querying.templates import (
     DEFAULT_TRACE_DEPTH,
     FIND_ENTITY,
     FIND_FULLTEXT,
+    FIND_IMPORTED_NAME,
     FIND_RELATED,
     GET_DEPENDENCIES,
     GET_DEPENDENCIES_COUNT,
@@ -106,6 +107,9 @@ _TIER_RANK = {"exact": 0, "fulltext": 1, "lexical": 2}
 _SOURCE_PRIORITY_PACKAGE = 0
 _SOURCE_PRIORITY_DOCS = 1
 _SOURCE_PRIORITY_TESTS = 2
+_PACKAGE_LOCAL_PREFIXES = ("fastapi/", "fastapi.")
+_DI_CONCEPT_TERMS = ("injection", "resolution", "inject", "injecting", "resolving")
+_DI_ENTITY_NAMES = ("Depends", "get_dependant", "solve_dependencies")
 
 
 def source_priority(file_path: str | None) -> int:
@@ -125,22 +129,112 @@ def source_priority(file_path: str | None) -> int:
     return _SOURCE_PRIORITY_PACKAGE
 
 
+def package_local_priority(qualified_name: str | None, file_path: str | None) -> int:
+    """Rank FastAPI-package coordinates above other package-source hits.
+
+    Args:
+        qualified_name: Graph qualified name.
+        file_path: Repo-relative path.
+
+    Returns:
+        ``0`` for ``fastapi/`` or ``fastapi.*``, else ``1``.
+    """
+    path = (file_path or "").replace("\\", "/").lstrip("./").lower()
+    qualified = (qualified_name or "").lower()
+    if path.startswith(_PACKAGE_LOCAL_PREFIXES[0]) or qualified.startswith(
+        _PACKAGE_LOCAL_PREFIXES[1]
+    ):
+        return 0
+    return 1
+
+
+def path_name_affinity(name: str | None, file_path: str | None) -> int:
+    """Rank files whose stem matches the looked-up symbol.
+
+    Args:
+        name: Entity or imported name.
+        file_path: Repo-relative path.
+
+    Returns:
+        Lower is better: exact/contained stem match, then unrelated.
+    """
+    if not name or not file_path:
+        return 2
+    stem = file_path.replace("\\", "/").rsplit("/", 1)[-1]
+    if "." in stem:
+        stem = stem.rsplit(".", 1)[0]
+    compact_stem = re.sub(r"[^a-z0-9]", "", stem.lower())
+    if compact_stem in {"", "init"}:
+        return 2
+    needle = re.sub(r"[^a-z0-9]", "", name.lower())
+    if not needle:
+        return 2
+    stem_root = compact_stem.rstrip("s")
+    name_root = needle.rstrip("s")
+    if stem_root == name_root or compact_stem == needle:
+        return 0
+    if stem_root and stem_root in needle:
+        return 0
+    if name_root and name_root in compact_stem:
+        return 0
+    return 1
+
+
 def retrieval_sort_key(
     tier: str | None,
     file_path: str | None,
     score: float,
-) -> tuple[int, int, float]:
-    """Sort key: retrieval tier, then source path, then descending score.
+    *,
+    name: str | None = None,
+    qualified_name: str | None = None,
+) -> tuple[int, int, int, int, float]:
+    """Sort key: tier, package vs tests, FastAPI-local, filename affinity, score.
 
     Args:
         tier: Cascade tier name.
         file_path: Repo-relative path.
         score: Hit score (higher is better).
+        name: Optional entity name for filename affinity.
+        qualified_name: Optional graph qualified name.
 
     Returns:
         Tuple suitable for ``list.sort``.
     """
-    return (_TIER_RANK.get(tier or "", 9), source_priority(file_path), -float(score))
+    return (
+        _TIER_RANK.get(tier or "", 9),
+        source_priority(file_path),
+        package_local_priority(qualified_name, file_path),
+        path_name_affinity(name, file_path),
+        -float(score),
+    )
+
+
+def conceptual_entity_names(query: str) -> list[str]:
+    """Return extra identifier lookups for conceptual questions.
+
+    Dependency injection/resolution questions should also hit ``Depends`` and
+    the resolver helpers in ``fastapi/dependencies/utils.py``.
+
+    Args:
+        query: User query or lookup phrase.
+
+    Returns:
+        Deduplicated extra names, excluding ``query`` itself when it is already
+        one of those identifiers.
+    """
+    lowered = query.lower()
+    if "dependenc" not in lowered:
+        return []
+    if not any(term in lowered for term in _DI_CONCEPT_TERMS):
+        return []
+    extra: list[str] = []
+    seen: set[str] = {query.strip().lower()}
+    for name in _DI_ENTITY_NAMES:
+        if name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        extra.append(name)
+    return extra
 
 
 def proper_noun_tokens(text: str) -> list[str]:
@@ -376,12 +470,13 @@ class GraphQueryService:
         ranked: list[EntityHit] = []
         truncated = False
 
-        exact = self.execute_query(
-            FIND_ENTITY,
-            {"name": query, "entity_type": entity_type},
+        truncated = truncated or self._merge_identifier_hits(
+            ranked, seen, query, entity_type=entity_type
         )
-        truncated = truncated or exact.truncated
-        _merge_hits(ranked, seen, exact.rows, tier="exact")
+        for extra in conceptual_entity_names(query):
+            truncated = truncated or self._merge_identifier_hits(
+                ranked, seen, extra, entity_type=entity_type
+            )
 
         lucene = lucene_query(query)
         if lucene:
@@ -412,7 +507,15 @@ class GraphQueryService:
             except Exception as exc:
                 log.warning("query.lexical_failed", error=str(exc))
 
-        ranked.sort(key=lambda hit: retrieval_sort_key(hit.tier, hit.file_path, hit.score))
+        ranked.sort(
+            key=lambda hit: retrieval_sort_key(
+                hit.tier,
+                hit.file_path,
+                hit.score,
+                name=hit.name,
+                qualified_name=hit.qualified_name,
+            )
+        )
         log.info(
             "query.retrieve",
             query=query,
@@ -424,6 +527,42 @@ class GraphQueryService:
             result_count=len(ranked),
             truncated=truncated,
         )
+
+    def _merge_identifier_hits(
+        self,
+        ranked: list[EntityHit],
+        seen: set[str],
+        name: str,
+        *,
+        entity_type: str | None,
+    ) -> bool:
+        """Merge exact-name and import/re-export hits for ``name``.
+
+        Args:
+            ranked: Accumulator of ranked hits.
+            seen: Dedup keys already present in ``ranked``.
+            name: Identifier or lookup phrase.
+            entity_type: Optional label filter.
+
+        Returns:
+            Whether any contributing query was truncated.
+        """
+        truncated = False
+        exact = self.execute_query(
+            FIND_ENTITY,
+            {"name": name, "entity_type": entity_type},
+        )
+        truncated = truncated or exact.truncated
+        _merge_hits(ranked, seen, exact.rows, tier="exact")
+        if not _IDENTIFIER_RE.fullmatch(name.strip()):
+            return truncated
+        imported = self.execute_query(
+            FIND_IMPORTED_NAME,
+            {"name": name, "entity_type": entity_type},
+        )
+        truncated = truncated or imported.truncated
+        _merge_hits(ranked, seen, imported.rows, tier="exact")
+        return truncated
 
     def get_dependencies(self, name: str) -> NeighborQueryResult:
         """Return outgoing IMPORTS / DEPENDS_ON / CALLS neighbors.
@@ -909,6 +1048,8 @@ __all__ = [
     "RelatedQueryResult",
     "RetrievalTier",
     "lucene_query",
+    "package_local_priority",
+    "path_name_affinity",
     "proper_noun_tokens",
     "retrieval_sort_key",
     "source_priority",

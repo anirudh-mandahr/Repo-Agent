@@ -352,9 +352,9 @@ async def test_cache_hit_skips_llm_calls() -> None:
     llm = StubProvider([])
     service = OrchestratorService(llm, settings=settings)
 
-    # cache_key = orchestrator:v1:{index_version}:{session_id}:{normalized_query}
+    # cache_key = orchestrator:v1:{index_version}:{session_id}:{normalized_query}:{entities}
     normalized = "compare fastapi"
-    expected_cache_key = f"orchestrator:v1:idx-2:session-1:{normalized}"
+    expected_cache_key = f"orchestrator:v1:idx-2:session-1:{normalized}:Compare,FastAPI"
 
     cached = SimpleNamespace(
         response_json={
@@ -890,6 +890,202 @@ async def test_comparison_query_invokes_compare_implementations() -> None:
     ]
     assert "code_analyst.compare_implementations" in result.metadata["tools_invoked"]
     assert graph_query.find_entity_calls == ["FastAPI", "APIRouter"]
+    assert code_analyst.explain_calls == []
+    assert code_analyst.analyze_calls == []
+    assert code_analyst.analyze_class_calls == []
+    assert code_analyst.snippets_requested == []
+    assert graph_query.relationship_calls == []
+    unused = {
+        "code_analyst.explain_implementation",
+        "code_analyst.analyze_function",
+        "code_analyst.analyze_class",
+        "code_analyst.get_code_snippet",
+        "graph_query.get_dependencies",
+        "graph_query.get_dependents",
+        "graph_query.trace_imports",
+        "graph_query.find_related",
+    }
+    invoked = set(result.metadata["tools_invoked"])
+    assert not invoked.intersection(unused)
+
+
+@pytest.mark.asyncio
+async def test_mixed_compare_with_dependents_skips_broad_fanout() -> None:
+    llm = StubProvider(
+        [
+            QueryIntent(
+                routing_mode="llm",
+                intent="mixed",
+                entities=["FastAPI", "APIRouter"],
+                target_agents=["graph_query", "code_analyst"],
+                reasoning="compare then dependents",
+            ).model_dump(),
+            "FINAL ANSWER",
+        ]
+    )
+    settings = OrchestratorSettings(routing_strategy="llm_first")
+    service = OrchestratorService(llm, settings=settings)
+    code_analyst = _CodeAnalystClient()
+    graph_query = _GraphQueryClient(
+        index_version="idx-1",
+        find_entity_by_name={
+            "FastAPI": {
+                "name": "FastAPI",
+                "qualified_name": "fastapi.applications.FastAPI",
+                "entity_type": "Class",
+                "file_path": "fastapi/applications.py",
+                "line_start": 42,
+                "line_end": 4774,
+            },
+            "APIRouter": {
+                "name": "APIRouter",
+                "qualified_name": "fastapi.routing.APIRouter",
+                "entity_type": "Class",
+                "file_path": "fastapi/routing.py",
+                "line_start": 2255,
+                "line_end": 6447,
+            },
+        },
+    )
+    result = await service.handle_query(
+        "Compare FastAPI and APIRouter implementations, then show who depends on them",
+        "session-1",
+        clients=_clients(graph_query=graph_query, code_analyst=code_analyst),  # type: ignore[arg-type]
+        correlation_id="corr-compare-deps",
+    )
+    invoked = set(result.metadata["tools_invoked"])
+    assert "graph_query.find_entity" in invoked
+    assert "graph_query.get_dependents" in invoked
+    assert "code_analyst.compare_implementations" in invoked
+    assert "code_analyst.explain_implementation" not in invoked
+    assert "code_analyst.analyze_class" not in invoked
+    assert "code_analyst.analyze_function" not in invoked
+    assert "code_analyst.get_code_snippet" not in invoked
+    assert "graph_query.get_dependencies" not in invoked
+    assert "graph_query.trace_imports" not in invoked
+    assert "graph_query.find_related" not in invoked
+    assert {name for name, _target in graph_query.relationship_calls} == {"get_dependents"}
+
+
+@pytest.mark.asyncio
+async def test_compare_overlaps_dependent_lookups() -> None:
+    analyst_started = asyncio.Event()
+
+    class _WaitingGraph(_GraphQueryClient):
+        async def get_dependents(self, name: str) -> object:
+            await asyncio.wait_for(analyst_started.wait(), timeout=2)
+            return await super().get_dependents(name)
+
+    class _SignallingCode(_CodeAnalystClient):
+        async def compare_implementations(self, name_a: str, name_b: str) -> object:
+            analyst_started.set()
+            return await super().compare_implementations(name_a, name_b)
+
+    llm = StubProvider(
+        [
+            QueryIntent(
+                routing_mode="llm",
+                intent="mixed",
+                entities=["FastAPI", "APIRouter"],
+                target_agents=["graph_query", "code_analyst"],
+                reasoning="compare then dependents",
+            ).model_dump(),
+            "FINAL ANSWER",
+        ]
+    )
+    service = OrchestratorService(
+        llm, settings=OrchestratorSettings(routing_strategy="llm_first")
+    )
+    graph_query = _WaitingGraph(
+        index_version="idx-1",
+        find_entity_by_name={
+            "FastAPI": {
+                "name": "FastAPI",
+                "qualified_name": "fastapi.applications.FastAPI",
+                "entity_type": "Class",
+                "file_path": "fastapi/applications.py",
+                "line_start": 42,
+                "line_end": 80,
+            },
+            "APIRouter": {
+                "name": "APIRouter",
+                "qualified_name": "fastapi.routing.APIRouter",
+                "entity_type": "Class",
+                "file_path": "fastapi/routing.py",
+                "line_start": 10,
+                "line_end": 40,
+            },
+        },
+    )
+    code_analyst = _SignallingCode()
+    result = await service.handle_query(
+        "Compare FastAPI and APIRouter implementations, then show who depends on them",
+        "session-1",
+        clients=_clients(graph_query=graph_query, code_analyst=code_analyst),  # type: ignore[arg-type]
+        correlation_id="corr-compare-overlap",
+    )
+    assert code_analyst.compare_calls
+    assert "graph_query.get_dependents" in result.metadata["tools_invoked"]
+    assert "code_analyst.compare_implementations" in result.metadata["tools_invoked"]
+
+
+@pytest.mark.asyncio
+async def test_compare_timeout_degrades_without_dropping_graph_hits() -> None:
+    class _TimeoutCompare(_CodeAnalystClient):
+        async def compare_implementations(self, name_a: str, name_b: str) -> object:
+            raise TimeoutError("compare timeout")
+
+    llm = StubProvider(
+        [
+            QueryIntent(
+                routing_mode="llm",
+                intent="comparison",
+                entities=["FastAPI", "APIRouter"],
+                target_agents=["graph_query", "code_analyst"],
+                reasoning="compare",
+            ).model_dump(),
+            "Graph-backed comparison fallback.",
+        ]
+    )
+    settings = OrchestratorSettings(routing_strategy="llm_first")
+    service = OrchestratorService(llm, settings=settings)
+    graph_query = _GraphQueryClient(
+        index_version="idx-1",
+        find_entity_by_name={
+            "FastAPI": {
+                "name": "FastAPI",
+                "qualified_name": "fastapi.applications.FastAPI",
+                "entity_type": "Class",
+                "file_path": "fastapi/applications.py",
+                "line_start": 42,
+                "line_end": 80,
+            },
+            "APIRouter": {
+                "name": "APIRouter",
+                "qualified_name": "fastapi.routing.APIRouter",
+                "entity_type": "Class",
+                "file_path": "fastapi/routing.py",
+                "line_start": 10,
+                "line_end": 40,
+            },
+        },
+    )
+    result = await service.handle_query(
+        "Compare FastAPI and APIRouter implementations in the codebase",
+        "session-1",
+        clients=_clients(graph_query=graph_query, code_analyst=_TimeoutCompare()),  # type: ignore[arg-type]
+        correlation_id="corr-compare-timeout",
+    )
+    assert result.metadata.get("degraded") is True
+    graph = result.agent_outputs["graph_query"]
+    analyst = result.agent_outputs["code_analyst"]
+    assert graph.get("ok") is True
+    assert analyst.get("ok") is False
+    assert "timeout" in str(analyst.get("error") or analyst.get("degraded_note") or "").lower()
+    retrieved = str(graph.get("output") or "")
+    assert "fastapi/applications.py" in retrieved
+    assert "fastapi/routing.py" in retrieved
+    assert result.answer
 
 
 @pytest.mark.asyncio
@@ -1607,6 +1803,35 @@ def test_select_analysis_candidates_ranks_tests_below_package_source() -> None:
         ]
     )
     assert selected[0]["file_path"] == "fastapi/param_functions.py"
+
+
+def test_select_analysis_candidates_prefers_local_reexport_file() -> None:
+    selected = _select_analysis_candidates(
+        [
+            {
+                "name": "WebSocket",
+                "qualified_name": "tests.test_ws.WebSocket",
+                "file_path": "tests/test_ws.py",
+                "tier": "exact",
+                "score": 1.0,
+            },
+            {
+                "name": "WebSocket",
+                "qualified_name": "fastapi.routing.WebSocket",
+                "file_path": "fastapi/routing.py",
+                "tier": "exact",
+                "score": 1.0,
+            },
+            {
+                "name": "WebSocket",
+                "qualified_name": "fastapi.websockets.WebSocket",
+                "file_path": "fastapi/websockets.py",
+                "tier": "exact",
+                "score": 1.0,
+            },
+        ]
+    )
+    assert selected[0]["file_path"] == "fastapi/websockets.py"
 
 
 @pytest.mark.asyncio

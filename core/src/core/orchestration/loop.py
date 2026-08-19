@@ -14,6 +14,7 @@ from .budget import RequestBudget
 from .evidence import evaluate_evidence, merge_agent_outputs, refine_plan
 from .executor import run_plan
 from .models import AgentName, AgentOutput, ExecutionPlan, PlanIteration
+from .prompt_budget import estimated_synthesis_prompt_tokens
 
 log = get_logger(__name__)
 
@@ -113,6 +114,15 @@ async def run_refinement_loop(
             merge_agent_outputs(combined, round_outputs) if combined else dict(round_outputs)
         )
         assessment = evaluate_evidence(query, current, combined)
+        if budget is not None:
+            budget.apply_prompt_reserve(
+                estimated_synthesis_prompt_tokens(
+                    query,
+                    combined,
+                    token_budget=settings.synthesis_prompt_token_budget,
+                    order=settings.prompt_truncation_order,
+                )
+            )
         search_terms: Sequence[str]
         if current.search_terms:
             search_terms = current.search_terms

@@ -16,6 +16,7 @@ from core.observability.ledger import TokenLedger
 from core.querying.service import proper_noun_tokens
 from core.settings import OrchestratorSettings
 
+from .budget import RequestBudget
 from .models import AgentName, SynthesisResult
 from .prompt_budget import (
     TruncationOrder,
@@ -404,15 +405,15 @@ async def synthesize_response(
     token_ledger: TokenLedger | None = None,
     correlation_id: str | None = None,
     timeout_s: float | None = None,
+    budget: RequestBudget | None = None,
     on_token: TokenCallback | None = None,
 ) -> SynthesisResult:
     """Merge agent outputs into a final answer, falling back to retrieved evidence.
 
-    One LLM call synthesizes the answer. When that call times out or errors, the
-    already-retrieved specialist outputs are rendered as markdown instead of
-    raising, so successful retrieval is never discarded. Tokens are streamed to
-    ``on_token`` when the provider supports ``stream``; a mid-stream error still
-    falls back to evidence.
+    One LLM call synthesizes the answer. When that call times out or errors after
+    tokens have already been streamed, those tokens are returned as a partial
+    answer instead of discarded. With no emitted tokens, specialist outputs are
+    rendered as markdown so successful retrieval is never dropped.
 
     Args:
         query: User question.
@@ -422,8 +423,10 @@ async def synthesize_response(
         settings: Orchestrator timeouts and the synthesis prompt token budget.
         token_ledger: Optional per-request token accumulator.
         correlation_id: Request id for logging and ledger keys.
-        timeout_s: Optional derived wall-clock timeout. Defaults to
-            ``settings.synthesis_timeout_s``.
+        timeout_s: Optional derived wall-clock timeout. Precedence: ``budget``
+            wins when set, then ``timeout_s``, then ``settings.synthesis_timeout_s``.
+        budget: Optional request budget used to scale synthesis time with prompt
+            size after the prompt is measured.
         on_token: Optional callback invoked with each streamed synthesis chunk.
 
     Returns:
@@ -468,14 +471,22 @@ async def synthesize_response(
         Message(role="system", content=SYNTHESIS_SYSTEM_PROMPT),
         Message(role="user", content=user_prompt),
     ]
-    timeout = settings.synthesis_timeout_s if timeout_s is None else timeout_s
+    if budget is not None:
+        budget.apply_prompt_reserve(estimated_tokens)
+        timeout = budget.synthesis_timeout_s(prompt_tokens=estimated_tokens)
+    elif timeout_s is not None:
+        timeout = timeout_s
+    else:
+        timeout = settings.synthesis_timeout_s
     started = time.perf_counter()
     first_token_at: float | None = None
+    emitted: list[str] = []
 
     async def _emit(chunk: str) -> None:
         nonlocal first_token_at
         if not chunk:
             return
+        emitted.append(chunk)
         if first_token_at is None:
             first_token_at = time.perf_counter()
             record_ttft(first_token_at - started)
@@ -514,6 +525,29 @@ async def synthesize_response(
     except Exception as exc:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         exception_type = type(exc).__name__
+        partial_text = "".join(emitted)
+        if partial_text.strip():
+            log.warning(
+                "orchestrator.synthesis_partial",
+                correlation_id=correlation_id or "-",
+                prompt_chars=prompt_chars,
+                estimated_tokens=estimated_tokens,
+                elapsed_ms=elapsed_ms,
+                agents_invoked=list(agent_outputs.keys()),
+                exception_type=exception_type,
+                emitted_chars=len(partial_text),
+            )
+            return _partial_synthesis_result(
+                query,
+                agent_outputs,
+                partial_text,
+                incomplete=incomplete,
+                truncation=truncation,
+                estimated_tokens=estimated_tokens,
+                prompt_chars=prompt_chars,
+                reason=exception_type,
+                duration_s=time.perf_counter() - started,
+            )
         log.warning(
             "orchestrator.synthesis_failed",
             correlation_id=correlation_id or "-",
@@ -597,6 +631,51 @@ def _split_stream_item(item: Any) -> tuple[str, Any]:
         delta, usage = item
         return str(delta or ""), usage
     return str(item or ""), None
+
+
+def _partial_synthesis_result(
+    query: str,
+    agent_outputs: Mapping[AgentName, Any],
+    text: str,
+    *,
+    incomplete: bool,
+    truncation: Any,
+    estimated_tokens: int,
+    prompt_chars: int,
+    reason: str,
+    duration_s: float,
+) -> SynthesisResult:
+    """Keep streamed tokens after a timeout or mid-stream error.
+
+    Args:
+        query: User question.
+        agent_outputs: Specialist payloads used for source footnotes.
+        text: Tokens already emitted before the failure.
+        incomplete: Whether retrieval itself was degraded.
+        truncation: Prompt-budget truncation record, if any.
+        estimated_tokens: Prompt token estimate.
+        prompt_chars: Prompt character count.
+        reason: Exception class name.
+        duration_s: Elapsed synthesis seconds.
+
+    Returns:
+        A non-evidence-only result marked ``partial``.
+    """
+    from core.observability.metrics import record_synthesis_latency
+
+    record_synthesis_latency(duration_s)
+    answer = text
+    if incomplete:
+        answer = f"{_INCOMPLETE_RETRIEVAL_PREFIX}\n\n{answer.lstrip()}"
+    return SynthesisResult(
+        answer=_with_grounded_sources(query, answer, agent_outputs),
+        evidence_only=False,
+        partial=True,
+        degraded_reason=reason,
+        prompt_truncated=truncation,
+        estimated_tokens=estimated_tokens,
+        prompt_chars=prompt_chars,
+    )
 
 
 def _evidence_fallback(

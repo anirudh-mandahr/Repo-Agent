@@ -13,7 +13,7 @@ from mcp.types import CallToolResult, TextContent
 
 from core.exceptions import AgentUnavailableError
 from core.mcp.auth import mcp_request_headers
-from core.resilience.session_pool import AgentSessionPool, ToolSession
+from core.resilience.session_pool import AgentSessionPool, ProgressCallback, ToolSession
 
 
 class StreamableHttpSession:
@@ -35,6 +35,7 @@ class StreamableHttpSession:
         arguments: Mapping[str, Any] | None = None,
         *,
         meta: dict[str, Any] | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> Any:
         """Call a tool on the live session.
 
@@ -42,6 +43,7 @@ class StreamableHttpSession:
             name: MCP tool name.
             arguments: Tool arguments.
             meta: Request metadata forwarded to the server.
+            progress_callback: Optional MCP progress consumer for live tokens.
 
         Returns:
             Raw ``CallToolResult``.
@@ -50,6 +52,7 @@ class StreamableHttpSession:
             name,
             arguments=dict(arguments or {}),
             meta=meta,
+            progress_callback=progress_callback,
         )
 
     async def aclose(self) -> None:

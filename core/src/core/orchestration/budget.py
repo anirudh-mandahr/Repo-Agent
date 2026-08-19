@@ -13,6 +13,34 @@ from core.settings import OrchestratorSettings
 BudgetCeiling = Literal["deadline", "tokens", "cost"]
 
 _UNLIMITED_DEADLINE_S = 86_400.0
+# Unmeasured engineering defaults, not bake-off results. The bake-off recorded
+# p95 latency per model, not a latency-versus-prompt-size slope. A fitted slope
+# from per-case bake-off latency and prompt tokens would validate both values.
+REFERENCE_SYNTHESIS_PROMPT_TOKENS = 4_000
+SYNTHESIS_EXTRA_SECONDS_PER_TOKEN = 0.002
+
+
+def scaled_synthesis_reserve_s(
+    prompt_tokens: int,
+    *,
+    base_reserve_s: float,
+) -> float:
+    """Wall-clock seconds to reserve for synthesis given estimated prompt tokens.
+
+    The configured reserve is the floor (typical prompt). Extra tokens beyond
+    :data:`REFERENCE_SYNTHESIS_PROMPT_TOKENS` add a linear prefill allowance.
+
+    Args:
+        prompt_tokens: Estimated system+user synthesis prompt tokens.
+        base_reserve_s: Configured ``ORCH_SYNTHESIS_RESERVE_S`` floor.
+
+    Returns:
+        Non-negative seconds. Never below ``base_reserve_s`` when that floor
+        is positive.
+    """
+    floor = max(0.0, base_reserve_s)
+    extra_tokens = max(0, int(prompt_tokens) - REFERENCE_SYNTHESIS_PROMPT_TOKENS)
+    return floor + extra_tokens * SYNTHESIS_EXTRA_SECONDS_PER_TOKEN
 
 
 @dataclass
@@ -31,7 +59,13 @@ class RequestBudget:
     max_synthesis_timeout_s: float
     synthesis_reserve_s: float = 0.0
     exhausted: BudgetCeiling | None = None
+    _base_synthesis_reserve_s: float = 0.0
     _clock: Callable[[], float] = field(default=time.monotonic, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Keep the configured reserve floor when callers only set the effective value."""
+        if self._base_synthesis_reserve_s <= 0.0 and self.synthesis_reserve_s > 0.0:
+            self._base_synthesis_reserve_s = self.synthesis_reserve_s
 
     @classmethod
     def from_settings(
@@ -67,6 +101,7 @@ class RequestBudget:
             if enabled and settings.request_cost_usd_max > 0
             else None
         )
+        reserve = max(0.0, settings.synthesis_reserve_s)
         return cls(
             deadline_monotonic=started + max(0.0, deadline_s),
             token_ceiling=token_ceiling,
@@ -74,7 +109,8 @@ class RequestBudget:
             safety_margin_s=max(0.0, settings.synthesis_safety_margin_s),
             min_synthesis_timeout_s=max(0.0, settings.synthesis_min_timeout_s),
             max_synthesis_timeout_s=max(0.0, settings.synthesis_timeout_s),
-            synthesis_reserve_s=max(0.0, settings.synthesis_reserve_s),
+            synthesis_reserve_s=reserve,
+            _base_synthesis_reserve_s=reserve,
             _clock=tick,
         )
 
@@ -101,14 +137,47 @@ class RequestBudget:
         """
         return max(0.0, self.remaining_s(now) - self.synthesis_reserve_s)
 
-    def synthesis_timeout_s(self, now: float | None = None) -> float:
+    def apply_prompt_reserve(self, prompt_tokens: int) -> float:
+        """Raise the synthesis reserve to match estimated prompt size.
+
+        Never shrinks below the configured ``ORCH_SYNTHESIS_RESERVE_S`` floor.
+        A zero floor (tests that disable the reserve) is left unchanged so
+        settings validation stays the source of the constant.
+
+        Args:
+            prompt_tokens: Estimated synthesis prompt tokens after compacting
+                and the per-prompt token budget.
+
+        Returns:
+            The reserve in force after applying ``prompt_tokens``.
+        """
+        if self._base_synthesis_reserve_s <= 0.0:
+            return self.synthesis_reserve_s
+        scaled = scaled_synthesis_reserve_s(
+            prompt_tokens,
+            base_reserve_s=self._base_synthesis_reserve_s,
+        )
+        self.synthesis_reserve_s = max(self._base_synthesis_reserve_s, scaled)
+        return self.synthesis_reserve_s
+
+    def synthesis_timeout_s(
+        self,
+        now: float | None = None,
+        *,
+        prompt_tokens: int | None = None,
+    ) -> float:
         """Derive the synthesis LLM timeout from remaining wall-clock.
 
         Remaining request time minus a safety margin, capped by the configured
-        synthesis maximum. ``0`` means skip the LLM and use evidence fallback.
+        typical-prompt maximum. When ``prompt_tokens`` (or a previously applied
+        prompt reserve) exceeds a typical prompt, the cap is raised so bulky
+        evidence can use leftover request time instead of timing out at 20s.
+
+        ``0`` means skip the LLM and use evidence fallback.
 
         Args:
             now: Optional monotonic timestamp.
+            prompt_tokens: Optional estimated synthesis prompt tokens.
 
         Returns:
             Seconds to wait for synthesis, or ``0`` when no room remains.
@@ -116,7 +185,16 @@ class RequestBudget:
         usable = self.remaining_s(now) - self.safety_margin_s
         if usable <= 0:
             return 0.0
-        return min(self.max_synthesis_timeout_s, usable)
+        cap = self.max_synthesis_timeout_s
+        if prompt_tokens is not None:
+            scaled = scaled_synthesis_reserve_s(
+                prompt_tokens,
+                base_reserve_s=self.max_synthesis_timeout_s,
+            )
+            cap = max(cap, scaled)
+        elif self.synthesis_reserve_s > self._base_synthesis_reserve_s:
+            cap = max(cap, self.synthesis_reserve_s)
+        return min(cap, usable)
 
     def check(
         self,

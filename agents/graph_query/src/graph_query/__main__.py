@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -52,23 +53,23 @@ _service = GraphQueryService(
 
 
 @mcp.tool()
-def health(ctx: ToolContext | None = None) -> HealthStatus:
+async def health(ctx: ToolContext | None = None) -> HealthStatus:
     """Return agent liveness after probing Neo4j."""
     bind_mcp_context(ctx)
-    status = check_graph_query_health()
+    status = await asyncio.to_thread(check_graph_query_health)
     log.info("health.check", agent=AGENT_NAME, status=status.status)
     return status
 
 
 @mcp.tool()
-def find_entity(
+async def find_entity(
     name: str,
     entity_type: str | None = None,
     ctx: ToolContext | None = None,
 ) -> EntityQueryResult:
     """Find Module/Class/Function/Method by exact name, full-text, or lexical hash."""
     bind_mcp_context(ctx)
-    result = _service.find_entity(name, entity_type)
+    result = await asyncio.to_thread(_service.find_entity, name, entity_type)
     log.info(
         "query.find_entity",
         name=name,
@@ -81,10 +82,10 @@ def find_entity(
 
 
 @mcp.tool()
-def get_dependencies(name: str, ctx: ToolContext | None = None) -> NeighborQueryResult:
+async def get_dependencies(name: str, ctx: ToolContext | None = None) -> NeighborQueryResult:
     """Return outgoing IMPORTS, DEPENDS_ON, and CALLS neighbors."""
     bind_mcp_context(ctx)
-    result = _service.get_dependencies(name)
+    result = await asyncio.to_thread(_service.get_dependencies, name)
     log.info(
         "query.get_dependencies",
         name=name,
@@ -96,10 +97,10 @@ def get_dependencies(name: str, ctx: ToolContext | None = None) -> NeighborQuery
 
 
 @mcp.tool()
-def get_dependents(name: str, ctx: ToolContext | None = None) -> NeighborQueryResult:
+async def get_dependents(name: str, ctx: ToolContext | None = None) -> NeighborQueryResult:
     """Return incoming IMPORTS, DEPENDS_ON, and CALLS neighbors."""
     bind_mcp_context(ctx)
-    result = _service.get_dependents(name)
+    result = await asyncio.to_thread(_service.get_dependents, name)
     log.info(
         "query.get_dependents",
         name=name,
@@ -111,14 +112,14 @@ def get_dependents(name: str, ctx: ToolContext | None = None) -> NeighborQueryRe
 
 
 @mcp.tool()
-def trace_imports(
+async def trace_imports(
     module: str,
     depth: int = DEFAULT_TRACE_DEPTH,
     ctx: ToolContext | None = None,
 ) -> ImportTraceResult:
     """Follow IMPORTS and DEPENDS_ON chains from a module (depth cap default 5)."""
     bind_mcp_context(ctx)
-    result = _service.trace_imports(module, depth)
+    result = await asyncio.to_thread(_service.trace_imports, module, depth)
     log.info(
         "query.trace_imports",
         module=module,
@@ -130,14 +131,14 @@ def trace_imports(
 
 
 @mcp.tool()
-def find_related(
+async def find_related(
     name: str,
     relationship_type: str,
     ctx: ToolContext | None = None,
 ) -> RelatedQueryResult:
     """Return neighbors along a spec relationship type, with direction."""
     bind_mcp_context(ctx)
-    result = _service.find_related(name, relationship_type)
+    result = await asyncio.to_thread(_service.find_related, name, relationship_type)
     log.info(
         "query.find_related",
         name=name,
@@ -150,14 +151,14 @@ def find_related(
 
 
 @mcp.tool()
-def execute_query(
+async def execute_query(
     cypher: str,
     params: dict[str, Any] | None = None,
     ctx: ToolContext | None = None,
 ) -> QueryResult:
     """Run a read-only Cypher query. Write clauses are rejected."""
     bind_mcp_context(ctx)
-    result = _service.execute_query(cypher, params)
+    result = await asyncio.to_thread(_service.execute_query, cypher, params)
     log.info(
         "query.execute_query",
         result_count=result.result_count,
@@ -167,10 +168,10 @@ def execute_query(
 
 
 @mcp.tool()
-def get_statistics(ctx: ToolContext | None = None) -> GraphStatistics:
+async def get_statistics(ctx: ToolContext | None = None) -> GraphStatistics:
     """Return label counts, relationship counts, and index metadata."""
     bind_mcp_context(ctx)
-    result = _service.get_statistics()
+    result = await asyncio.to_thread(_service.get_statistics)
     log.info(
         "query.get_statistics",
         index_version=result.index_version,

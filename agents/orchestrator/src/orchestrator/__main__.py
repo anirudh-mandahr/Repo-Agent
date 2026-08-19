@@ -17,6 +17,7 @@ from core.llm.factory import build_llm_provider
 from core.logging import bind_correlation_id, configure_logging, get_logger
 from core.mcp.context import bind_mcp_context
 from core.mcp.server import run_agent_mcp
+from core.mcp.streaming import stream_callbacks_from_mcp_context
 from core.memory import ConversationContext
 from core.orchestration import ExecutionPlan, QueryIntent
 from core.orchestration.mcp_clients import PooledOrchestratorClients, build_orchestrator_pool
@@ -60,7 +61,7 @@ mcp = FastMCP(
     port=_settings.port,
     log_level=_settings.log_level,
     stateless_http=True,
-    json_response=True,
+    json_response=False,  # SSE so progress notifications can interleave
     lifespan=_mcp_lifespan,
 )
 
@@ -178,11 +179,14 @@ async def handle_query(
             settings=_orchestrator_settings,
         ),
     )
+    on_token, on_event = stream_callbacks_from_mcp_context(ctx)
     result = await _service.handle_query(
         query,
         session_id,
         clients=clients,
         correlation_id=correlation_id,
+        on_token=on_token,
+        on_event=on_event,
     )
     return {"answer": result.answer, "metadata": result.metadata}
 

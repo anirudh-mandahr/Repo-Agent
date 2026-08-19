@@ -215,9 +215,34 @@ async def test_synthesis_llm_timeout_returns_evidence_only_answer() -> None:
     )
 
     assert result.evidence_only is True
+    assert result.partial is False
     assert result.degraded_reason == "TimeoutError"
     assert EVIDENCE_ONLY_HEADER in result.answer
     assert "fastapi.applications.FastAPI" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_synthesis_stream_timeout_returns_partial_not_evidence_dump() -> None:
+    class _PartialThenHang:
+        async def stream(self, *args: object, **kwargs: object) -> Any:
+            _ = args, kwargs
+            yield "FastAPI subclasses Starlette.", None
+            await asyncio.sleep(5)
+
+    result = await synthesize_response(
+        "What is the FastAPI class?",
+        _agent_outputs(),
+        ConversationContext(),
+        llm_provider=_PartialThenHang(),  # type: ignore[arg-type]
+        settings=OrchestratorSettings(synthesis_timeout_s=0.05),
+        correlation_id="corr-partial-timeout",
+    )
+
+    assert result.evidence_only is False
+    assert result.partial is True
+    assert result.degraded_reason == "TimeoutError"
+    assert "FastAPI subclasses Starlette" in result.answer
+    assert EVIDENCE_ONLY_HEADER not in result.answer
 
 
 @pytest.mark.asyncio

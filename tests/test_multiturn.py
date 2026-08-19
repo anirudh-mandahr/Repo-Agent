@@ -31,17 +31,22 @@ _GRAPH_LOOKUP_TOOLS = {
 class _MemoryClient:
     def __init__(self) -> None:
         self._turns: list[ConversationTurn] = []
+        self._cache: dict[str, object] = {}
+        self.cache_get_keys: list[str] = []
 
     async def get_context(self, session_id: str, token_budget: int = 3000) -> ConversationContext:
         _ = session_id, token_budget
         return ConversationContext(recent_turns=list(self._turns))
 
     async def get_cached_response(self, cache_key: str) -> object | None:
-        _ = cache_key
-        return None
+        self.cache_get_keys.append(cache_key)
+        payload = self._cache.get(cache_key)
+        if payload is None:
+            return None
+        return SimpleNamespace(response_json=payload)
 
     async def cache_response(self, cache_key: str, response_json: object) -> None:
-        _ = cache_key, response_json
+        self._cache[cache_key] = response_json
 
     async def append_turn(self, session_id: str, role: str, content: str) -> None:
         _ = session_id
@@ -60,6 +65,7 @@ class _GraphQueryClient:
     def __init__(self) -> None:
         self.find_entity_calls: list[str] = []
         self.find_related_calls: list[tuple[str, str]] = []
+        self.dependent_calls: list[str] = []
 
     async def get_statistics(self) -> object:
         return SimpleNamespace(index_version="idx-1")
@@ -67,6 +73,14 @@ class _GraphQueryClient:
     async def find_entity(self, name: str, entity_type: str | None = None) -> object:
         _ = entity_type
         self.find_entity_calls.append(name)
+        if "APIRouter" in name:
+            return {
+                "file_path": "fastapi/routing.py",
+                "line_start": 900,
+                "line_end": 1400,
+                "qualified_name": "fastapi.routing.APIRouter",
+                "name": "APIRouter",
+            }
         return {
             "file_path": "fastapi/applications.py",
             "line_start": 42,
@@ -79,7 +93,21 @@ class _GraphQueryClient:
         return {"name": name, "neighbors": []}
 
     async def get_dependents(self, name: str) -> object:
-        return {"name": name, "neighbors": []}
+        self.dependent_calls.append(name)
+        if "APIRouter" in name:
+            neighbors = [
+                {"name": "app.include_router", "qualified_name": "app.include_router"}
+            ]
+        elif "FastAPI" in name:
+            neighbors = [
+                {
+                    "name": "Starlette",
+                    "qualified_name": "starlette.applications.Starlette",
+                }
+            ]
+        else:
+            neighbors = []
+        return {"name": name, "neighbors": neighbors}
 
     async def find_related(self, name: str, relationship_type: str) -> object:
         self.find_related_calls.append((name, relationship_type))
@@ -171,3 +199,67 @@ async def test_follow_up_resolves_antecedent_to_fastapi() -> None:
     assert "FastAPI" in second.answer
     lowered = second.answer.lower()
     assert not any(phrase in lowered for phrase in _CLARIFICATION)
+
+
+@pytest.mark.asyncio
+async def test_follow_up_cache_key_includes_resolved_entities() -> None:
+    """Same follow-up text with a different antecedent must not reuse the cache."""
+    llm = StubProvider(
+        [
+            "APIRouter is the routing class in fastapi/routing.py.",
+            "app.include_router depends on APIRouter.",
+            "FastAPI is the main application class in fastapi/applications.py.",
+            "Starlette depends on FastAPI.",
+        ]
+    )
+    service = OrchestratorService(
+        llm, settings=OrchestratorSettings(routing_strategy="rules_first")
+    )
+    memory = _MemoryClient()
+    graph_query = _GraphQueryClient()
+    clients = _clients(memory=memory, graph_query=graph_query)
+
+    first = await service.handle_query(
+        "What is APIRouter?",
+        "session-poison",
+        clients=clients,  # type: ignore[arg-type]
+        correlation_id="corr-poison-1",
+    )
+    assert first.metadata["cached"] is False
+    assert "APIRouter" in first.answer
+
+    second = await service.handle_query(
+        "Who depends on it?",
+        "session-poison",
+        clients=clients,  # type: ignore[arg-type]
+        correlation_id="corr-poison-2",
+    )
+    assert second.metadata["cached"] is False
+    assert "APIRouter" in second.answer
+    assert second.metadata["cache_key"] != first.metadata["cache_key"]
+
+    third = await service.handle_query(
+        "What is FastAPI?",
+        "session-poison",
+        clients=clients,  # type: ignore[arg-type]
+        correlation_id="corr-poison-3",
+    )
+    assert third.metadata["cached"] is False
+    assert "FastAPI" in third.answer
+
+    graph_query.find_entity_calls.clear()
+    graph_query.dependent_calls.clear()
+    fourth = await service.handle_query(
+        "Who depends on it?",
+        "session-poison",
+        clients=clients,  # type: ignore[arg-type]
+        correlation_id="corr-poison-4",
+    )
+
+    assert fourth.metadata["cache_key"] != second.metadata["cache_key"]
+    assert fourth.metadata["cached"] is False
+    assert fourth.answer != second.answer
+    assert "Starlette" in fourth.answer
+    assert "APIRouter" not in fourth.answer
+    looked_up = graph_query.find_entity_calls + graph_query.dependent_calls
+    assert any("FastAPI" in name for name in looked_up)

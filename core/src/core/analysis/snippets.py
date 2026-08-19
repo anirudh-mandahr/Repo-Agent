@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -92,6 +93,36 @@ def get_snippet(
         f"{number:>{width}} {line}" for number, line in enumerate(chunk, start=window_start)
     )
     return "\n".join(numbered)
+
+
+async def get_snippet_async(
+    file_path: str,
+    line_start: int,
+    line_end: int,
+    context: int = DEFAULT_CONTEXT,
+    *,
+    repo_root: Path | str | None = None,
+) -> str:
+    """Offload :func:`get_snippet` (and its blocking ``read_text``) off the event loop.
+
+    Args:
+        file_path: str.
+        line_start: int.
+        line_end: int.
+        context: int.
+        repo_root: Path | str | None.
+
+    Returns:
+        str.
+    """
+    return await asyncio.to_thread(
+        get_snippet,
+        file_path,
+        line_start,
+        line_end,
+        context,
+        repo_root=repo_root,
+    )
 
 
 def is_module_entity(row: Mapping[str, Any] | None) -> bool:

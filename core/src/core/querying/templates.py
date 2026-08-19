@@ -27,6 +27,23 @@ FIND_ENTITY = dedent(
     """
 ).strip()
 
+FIND_IMPORTED_NAME = dedent(
+    """\
+    MATCH (m:Module)-[:IMPORTS]->(i:Import)
+    WHERE $name IN i.names OR i.alias = $name
+    WITH m
+    WHERE $entity_type IS NULL OR $entity_type IN ['Class', 'Module', 'Function']
+    RETURN ['Class'] AS labels,
+           $name AS name,
+           m.qualified_name + '.' + $name AS qualified_name,
+           m.file_path AS file_path,
+           null AS path,
+           m.line_start AS line_start,
+           m.line_end AS line_end,
+           1.0 AS score
+    """
+).strip()
+
 GET_DEPENDENCIES_COUNT = dedent(
     """\
     CALL {
@@ -258,6 +275,12 @@ FIND_FULLTEXT = dedent(
       AND (n:Module OR n:Class OR n:Function OR n:Method)
       AND ($entity_type IS NULL OR $entity_type IN labels(n))
     WITH n, max(score) AS score
+    WITH n, score,
+         CASE
+           WHEN n.file_path STARTS WITH 'tests/' OR n.file_path CONTAINS '/tests/' THEN 2
+           WHEN n.file_path STARTS WITH 'docs_src/' OR n.file_path CONTAINS '/docs_src/' THEN 1
+           ELSE 0
+         END AS source_rank
     RETURN labels(n) AS labels,
            n.name AS name,
            n.qualified_name AS qualified_name,
@@ -266,7 +289,7 @@ FIND_FULLTEXT = dedent(
            n.line_start AS line_start,
            n.line_end AS line_end,
            score AS score
-    ORDER BY score DESC
+    ORDER BY source_rank, score DESC
     LIMIT $top_k
     """
 ).strip()

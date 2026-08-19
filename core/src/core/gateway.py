@@ -7,7 +7,7 @@ import inspect
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any, Literal, Protocol
@@ -144,6 +144,8 @@ class OrchestratorGatewayClient(Protocol):
         session_id: str,
         *,
         correlation_id: str,
+        on_token: Callable[[str], Awaitable[None]] | None = None,
+        on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """Run the full orchestrator loop.
 
@@ -151,6 +153,8 @@ class OrchestratorGatewayClient(Protocol):
             query: User question.
             session_id: Conversation id.
             correlation_id: Request correlation id.
+            on_token: Optional callback for live synthesis chunks.
+            on_event: Optional callback for live ``routing`` / ``agent_result``.
 
         Returns:
             Mapping with ``answer`` and ``metadata``.
@@ -495,8 +499,11 @@ class ChatGatewayService:
                     routing_mode=parsed.routing_mode,
                     tokens=parsed.tokens,
                     evidence_only=parsed.evidence_only,
+                    partial=parsed.partial,
                     degraded_reason=parsed.degraded_reason,
                     prompt_truncated=parsed.prompt_truncated,
+                    memory_available=parsed.memory_available,
+                    graph_statistics_available=parsed.graph_statistics_available,
                 ),
             )
             return
@@ -509,8 +516,11 @@ class ChatGatewayService:
         tools_invoked: list[str] = []
         metadata: dict[str, Any] | None = None
         evidence_only = False
+        partial = False
         degraded_reason: str | None = None
         prompt_truncated: dict[str, Any] | None = None
+        memory_available: bool | None = None
+        graph_statistics_available: bool | None = None
         tokens: dict[str, Any] = empty_token_totals()
 
         try:
@@ -530,12 +540,17 @@ class ChatGatewayService:
                 if isinstance(maybe_tools, list):
                     tools_invoked = [str(item) for item in maybe_tools]
                 evidence_only = bool(metadata.get("evidence_only", False))
+                partial = bool(metadata.get("partial", False))
                 maybe_reason = metadata.get("degraded_reason")
                 if maybe_reason is not None:
                     degraded_reason = str(maybe_reason)
                 maybe_truncated = metadata.get("prompt_truncated")
                 if isinstance(maybe_truncated, dict):
                     prompt_truncated = maybe_truncated
+                memory_available = _optional_bool(metadata.get("memory_available"))
+                graph_statistics_available = _optional_bool(
+                    metadata.get("graph_statistics_available")
+                )
         except _PROPAGATED_CHAT_ERRORS:
             raise
         except Exception as exc:
@@ -568,8 +583,11 @@ class ChatGatewayService:
                 routing_mode=routing_mode,
                 tokens=tokens,
                 evidence_only=evidence_only,
+                partial=partial,
                 degraded_reason=degraded_reason,
                 prompt_truncated=prompt_truncated,
+                memory_available=memory_available,
+                graph_statistics_available=graph_statistics_available,
             ),
         )
 
@@ -635,8 +653,11 @@ class _ParsedPayload:
     tools_invoked: list[str]
     tokens: dict[str, Any]
     evidence_only: bool
+    partial: bool
     degraded_reason: str | None
     prompt_truncated: dict[str, Any] | None
+    memory_available: bool | None
+    graph_statistics_available: bool | None
 
 
 def _payload_fields(payload: Any) -> _ParsedPayload:
@@ -666,8 +687,11 @@ def _payload_fields(payload: Any) -> _ParsedPayload:
         tools_invoked=tools_invoked,
         tokens=tokens,
         evidence_only=bool(meta.get("evidence_only", False)),
+        partial=bool(meta.get("partial", False)),
         degraded_reason=str(reason) if reason is not None else None,
         prompt_truncated=truncated if isinstance(truncated, dict) else None,
+        memory_available=_optional_bool(meta.get("memory_available")),
+        graph_statistics_available=_optional_bool(meta.get("graph_statistics_available")),
     )
 
 
@@ -779,6 +803,10 @@ def _chunk_text(text: str, chunk_size: int) -> list[str]:
     return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
 
 
+def _optional_bool(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
 def _done_payload(
     *,
     correlation_id: str,
@@ -788,8 +816,11 @@ def _done_payload(
     routing_mode: str,
     tokens: dict[str, Any],
     evidence_only: bool = False,
+    partial: bool = False,
     degraded_reason: str | None = None,
     prompt_truncated: dict[str, Any] | None = None,
+    memory_available: bool | None = None,
+    graph_statistics_available: bool | None = None,
 ) -> dict[str, Any]:
     latency_ms = int((time.perf_counter() - started_at) * 1000)
     payload: dict[str, Any] = {
@@ -802,10 +833,16 @@ def _done_payload(
     }
     if evidence_only:
         payload["evidence_only"] = True
+    if partial:
+        payload["partial"] = True
     if degraded_reason is not None:
         payload["degraded_reason"] = degraded_reason
     if prompt_truncated is not None:
         payload["prompt_truncated"] = prompt_truncated
+    if memory_available is not None:
+        payload["memory_available"] = memory_available
+    if graph_statistics_available is not None:
+        payload["graph_statistics_available"] = graph_statistics_available
     return payload
 
 

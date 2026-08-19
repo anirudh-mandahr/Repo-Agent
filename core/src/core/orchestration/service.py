@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -17,10 +17,12 @@ from core.orchestration.budget import RequestBudget
 from core.orchestration.loop import run_refinement_loop
 from core.orchestration.models import AgentName, ExecutionPlan, SynthesisResult
 from core.orchestration.router import (
+    _rule_based_entities,
     analyze_query,
     apply_conversation_entities,
     intent_from_rule_result,
     normalize_grounded_intent,
+    resolve_entities,
     route_to_agents,
     rule_based_route,
 )
@@ -37,9 +39,21 @@ def _normalize_query(query: str) -> str:
     return re.sub(r"\s+", " ", query.strip()).lower()
 
 
-def _cache_key(*, session_id: str, normalized_query: str, index_version: str | None) -> str:
+def _entity_fingerprint(entities: Sequence[str]) -> str:
+    unique = {item.strip() for item in entities if item.strip()}
+    return ",".join(sorted(unique))
+
+
+def _cache_key(
+    *,
+    session_id: str,
+    normalized_query: str,
+    index_version: str | None,
+    entities: Sequence[str] = (),
+) -> str:
     version = index_version or "unknown"
-    return f"orchestrator:v1:{version}:{session_id}:{normalized_query}"
+    fingerprint = _entity_fingerprint(entities)
+    return f"orchestrator:v1:{version}:{session_id}:{normalized_query}:{fingerprint}"
 
 
 def _skipped_agents(
@@ -364,8 +378,10 @@ class OrchestratorService:
     ) -> HandleQueryResult:
         """Full orchestrator loop with graceful degradation and response caching.
 
-        Synthesis LLM timeouts and errors return an evidence-only answer with
-        ``degraded=true`` rather than discarding retrieved specialist output.
+        Synthesis LLM timeouts and errors keep any tokens already streamed
+        (``metadata.partial=true``). With no emitted tokens they return an
+        evidence-only answer with ``degraded=true`` rather than discarding
+        retrieved specialist output.
 
         Args:
             query: User question.
@@ -391,21 +407,41 @@ class OrchestratorService:
             memory_context = await clients.memory.get_context(
                 session_id, token_budget=token_budget
             )
-        except Exception:
+        except Exception as exc:
             memory_available = False
             memory_context = ConversationContext()
+            log.warning(
+                "orchestrator.memory_context_failed",
+                correlation_id=correlation_id,
+                error=str(exc),
+                exception_type=type(exc).__name__,
+            )
 
+        graph_statistics_available = True
         index_version: str | None = None
         try:
             stats = await clients.graph_query.get_statistics()
             index_version = getattr(stats, "index_version", None)
-        except Exception:
+        except Exception as exc:
+            graph_statistics_available = False
             index_version = None
+            log.warning(
+                "orchestrator.graph_statistics_failed",
+                correlation_id=correlation_id,
+                error=str(exc),
+                exception_type=type(exc).__name__,
+            )
 
+        resolved_entities = resolve_entities(
+            query,
+            _rule_based_entities(query),
+            memory_context,
+        )
         cache_key = _cache_key(
             session_id=session_id,
             normalized_query=_normalize_query(query),
             index_version=index_version,
+            entities=resolved_entities,
         )
 
         if memory_available:
@@ -439,6 +475,8 @@ class OrchestratorService:
                             "routing_mode": "cache_hit",
                             "tools_invoked": cached_tools,
                             "tokens": empty_token_totals(),
+                            "memory_available": memory_available,
+                            "graph_statistics_available": graph_statistics_available,
                         },
                         agent_outputs={},
                     )
@@ -531,7 +569,7 @@ class OrchestratorService:
             settings=self._settings,
             token_ledger=self._token_ledger,
             correlation_id=correlation_id,
-            timeout_s=budget.synthesis_timeout_s(),
+            budget=budget,
             on_token=on_token,
         )
         answer = synthesis.answer
@@ -552,6 +590,7 @@ class OrchestratorService:
             "index_version": index_version,
             "routing_mode": intent.routing_mode,
             "memory_available": memory_available,
+            "graph_statistics_available": graph_statistics_available,
             "tokens": tokens,
             "degraded": degraded,
             "tools_invoked": tools_invoked,
@@ -564,6 +603,10 @@ class OrchestratorService:
         if synthesis.evidence_only:
             metadata["evidence_only"] = True
             metadata["degraded_reason"] = synthesis.degraded_reason
+        if synthesis.partial:
+            metadata["partial"] = True
+            if synthesis.degraded_reason is not None:
+                metadata["degraded_reason"] = synthesis.degraded_reason
         if budget.exhausted:
             metadata["budget_exhausted"] = budget.exhausted
             from core.observability.metrics import record_budget_exhausted

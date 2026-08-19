@@ -344,6 +344,56 @@ async def test_analyze_class_and_compare_accept_short_class_names() -> None:
     assert "Same class" in compared.summary
 
 
+async def test_compare_implementations_clips_large_snippets(tmp_path: Path) -> None:
+    lines = [f"line_{index} = {index}" for index in range(1, 201)]
+    (tmp_path / "left.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (tmp_path / "right.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    lookup = FakeLookup()
+    lookup.by_name["left.fn"] = [
+        {
+            "qualified_name": "left.fn",
+            "name": "fn",
+            "file_path": "left.py",
+            "line_start": 1,
+            "line_end": 200,
+            "parameters": [],
+            "decorators": [],
+            "module": "left",
+            "class_name": None,
+            "dependents": [],
+        }
+    ]
+    lookup.by_name["right.fn"] = [
+        {
+            "qualified_name": "right.fn",
+            "name": "fn",
+            "file_path": "right.py",
+            "line_start": 1,
+            "line_end": 200,
+            "parameters": [],
+            "decorators": [],
+            "module": "right",
+            "class_name": None,
+            "dependents": [],
+        }
+    ]
+    provider = StubProvider()
+    provider.enqueue(
+        ImplementationComparison(
+            name_a="left.fn",
+            name_b="right.fn",
+            summary="Clipped comparison.",
+        ).model_dump()
+    )
+    service = CodeAnalystService(provider, lookup, repo_root=tmp_path)
+    result = await service.compare_implementations("left.fn", "right.fn")
+    assert result.error is None
+    prompt = "\n".join(message.content for message in provider.calls[0].messages)
+    assert "more lines omitted" in prompt
+    assert "line_1 = 1" in prompt
+    assert "line_200 = 200" not in prompt
+
+
 async def test_get_code_snippet_reresolves_non_file_path() -> None:
     provider = StubProvider()
     lookup = FakeLookup()

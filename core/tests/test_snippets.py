@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from core.analysis.snippets import PathTraversalError, get_snippet, resolve_repo_path
+from core.analysis.snippets import (
+    PathTraversalError,
+    get_snippet,
+    get_snippet_async,
+    resolve_repo_path,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -52,3 +57,13 @@ def test_get_snippet_returns_empty_when_start_is_past_eof(tmp_path: Path) -> Non
     text = get_snippet("sample.py", 20, 25, repo_root=repo)
 
     assert text == ""
+
+
+@pytest.mark.asyncio
+async def test_get_snippet_async_offloads_read_and_matches_sync() -> None:
+    sync_text = get_snippet("sample_module.py", 13, 14, context=2, repo_root=FIXTURES)
+    async_text = await get_snippet_async(
+        "sample_module.py", 13, 14, context=2, repo_root=FIXTURES
+    )
+    assert async_text == sync_text
+    assert "def helper" in async_text

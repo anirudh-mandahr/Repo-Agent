@@ -57,13 +57,22 @@ def test_indexer_parse_python_ast_binds_meta() -> None:
 def test_graph_query_health_binds_inbound_correlation_id(monkeypatch: pytest.MonkeyPatch) -> None:
     from graph_query.__main__ import health
 
+    bound: list[str] = []
+    original = bind_mcp_context
+
+    def _bind(ctx: Any) -> str:
+        correlation_id = original(ctx)
+        bound.append(correlation_id)
+        return correlation_id
+
+    monkeypatch.setattr("graph_query.__main__.bind_mcp_context", _bind)
     monkeypatch.setattr(
         "graph_query.__main__.check_graph_query_health",
         lambda: HealthStatus(status="ok", agent="graph_query"),
     )
-    status = health(_Ctx(_Meta("corr-gq-1")))  # type: ignore[arg-type]
+    status = asyncio.run(health(_Ctx(_Meta("corr-gq-1"))))  # type: ignore[arg-type]
     assert status.status == "ok"
-    assert get_correlation_id() == "corr-gq-1"
+    assert bound == ["corr-gq-1"]
 
 
 def test_memory_health_binds_inbound_correlation_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -241,13 +250,13 @@ def test_graph_query_tools(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(mod, "_service", _Svc())
     ctx = _Ctx(_Meta("corr-gq"))
-    assert mod.find_entity("FastAPI", None, ctx).result_count == 1  # type: ignore[arg-type]
-    assert mod.get_dependencies("FastAPI", ctx).result_count == 0  # type: ignore[arg-type]
-    assert mod.get_dependents("FastAPI", ctx).result_count == 0  # type: ignore[arg-type]
-    assert mod.trace_imports("fastapi", 2, ctx).depth == 2  # type: ignore[arg-type]
-    assert mod.find_related("FastAPI", "CALLS", ctx).result_count == 0  # type: ignore[arg-type]
-    assert mod.execute_query("RETURN 1", None, ctx).result_count == 0  # type: ignore[arg-type]
-    assert mod.get_statistics(ctx).index_version == "v1"  # type: ignore[arg-type]
+    assert asyncio.run(mod.find_entity("FastAPI", None, ctx)).result_count == 1  # type: ignore[arg-type]
+    assert asyncio.run(mod.get_dependencies("FastAPI", ctx)).result_count == 0  # type: ignore[arg-type]
+    assert asyncio.run(mod.get_dependents("FastAPI", ctx)).result_count == 0  # type: ignore[arg-type]
+    assert asyncio.run(mod.trace_imports("fastapi", 2, ctx)).depth == 2  # type: ignore[arg-type]
+    assert asyncio.run(mod.find_related("FastAPI", "CALLS", ctx)).result_count == 0  # type: ignore[arg-type]
+    assert asyncio.run(mod.execute_query("RETURN 1", None, ctx)).result_count == 0  # type: ignore[arg-type]
+    assert asyncio.run(mod.get_statistics(ctx)).index_version == "v1"  # type: ignore[arg-type]
 
 
 def test_memory_tools(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -415,6 +424,52 @@ def test_orchestrator_tools_budget_and_timeout(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(mod, "get_mcp_pool", lambda: SimpleNamespace(breakers=SimpleNamespace()))
     payload = asyncio.run(mod.handle_query("q", "s", ctx))  # type: ignore[arg-type]
     assert payload["metadata"]["budget_exhausted"] == "deadline"
+
+
+def test_orchestrator_uses_sse_json_response_false() -> None:
+    from orchestrator.__main__ import mcp
+
+    assert mcp.settings.json_response is False
+
+
+def test_orchestrator_handle_query_reports_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from orchestrator import __main__ as mod
+
+    reported: list[str | None] = []
+
+    class _ProgressCtx:
+        def __init__(self) -> None:
+            self.request_context = SimpleNamespace(meta=_Meta("corr-stream"))
+
+        async def report_progress(
+            self, progress: float, total: float | None = None, message: str | None = None
+        ) -> None:
+            _ = progress, total
+            reported.append(message)
+
+    class _Service:
+        async def handle_query(self, *args: Any, **kwargs: Any) -> SimpleNamespace:
+            _ = args
+            on_token = kwargs.get("on_token")
+            if on_token is not None:
+                await on_token("Hel")
+            return SimpleNamespace(answer="Hello", metadata={"cached": False})
+
+    monkeypatch.setattr(mod, "_service", _Service())
+    monkeypatch.setattr(mod, "get_mcp_pool", lambda: SimpleNamespace(breakers=SimpleNamespace()))
+    monkeypatch.setattr(
+        mod.PooledOrchestratorClients,
+        "from_pool",
+        classmethod(lambda cls, *a, **k: object()),
+    )
+    payload = asyncio.run(mod.handle_query("q", "s", _ProgressCtx()))  # type: ignore[arg-type]
+    assert payload["answer"] == "Hello"
+    assert reported
+    decoded = reported[0]
+    assert decoded is not None
+    assert "Hel" in decoded
 
 
 def test_adapter_mains_start_servers(monkeypatch: pytest.MonkeyPatch) -> None:

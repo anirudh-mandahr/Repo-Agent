@@ -7,6 +7,13 @@ import json
 from collections.abc import Iterator, Mapping
 from typing import Any, Literal
 
+from .budget import (
+    REFERENCE_SYNTHESIS_PROMPT_TOKENS as REFERENCE_SYNTHESIS_PROMPT_TOKENS,
+)
+from .budget import (
+    SYNTHESIS_EXTRA_SECONDS_PER_TOKEN as SYNTHESIS_EXTRA_SECONDS_PER_TOKEN,
+)
+from .budget import scaled_synthesis_reserve_s as scaled_synthesis_reserve_s
 from .models import PromptTruncation
 from .prompts import SYNTHESIS_SYSTEM_PROMPT, SYNTHESIS_USER_PROMPT
 
@@ -72,6 +79,52 @@ def render_synthesis_user_prompt(
         session_context_block=session_context_block,
         agent_outputs=dump_agent_payload(agent_payload),
     )
+
+
+def agent_payload_dict(agent_outputs: Mapping[Any, Any]) -> dict[str, Any]:
+    """JSON-ish mapping of specialist outputs for prompt measurement.
+
+    Args:
+        agent_outputs: Per-agent results (models or mappings).
+
+    Returns:
+        A dict keyed by agent name.
+    """
+    payload: dict[str, Any] = {}
+    for agent, output in agent_outputs.items():
+        payload[str(agent)] = output.model_dump() if hasattr(output, "model_dump") else output
+    return payload
+
+
+def estimated_synthesis_prompt_tokens(
+    query: str,
+    agent_outputs: Mapping[Any, Any],
+    *,
+    session_context_block: str = "",
+    token_budget: int,
+    order: TruncationOrder = DEFAULT_TRUNCATION_ORDER,
+) -> int:
+    """Estimate synthesis prompt tokens after neighbor compact and the token cap.
+
+    Args:
+        query: User question.
+        agent_outputs: Specialist outputs collected so far.
+        session_context_block: Optional conversation-context section.
+        token_budget: ``ORCH_SYNTHESIS_PROMPT_TOKEN_BUDGET``.
+        order: Truncation order used by synthesis.
+
+    Returns:
+        Estimated tokens of the prompt that synthesis will actually send.
+    """
+    payload = compact_neighbor_payloads(agent_payload_dict(agent_outputs))
+    budgeted, _truncation = apply_prompt_budget(
+        payload,
+        query=query,
+        session_context_block=session_context_block,
+        budget=token_budget,
+        order=order,
+    )
+    return measure_synthesis_prompt(query, session_context_block, budgeted)[1]
 
 
 def measure_synthesis_prompt(
