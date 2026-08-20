@@ -128,6 +128,8 @@ curl -s http://localhost:8000/api/chat \
 
 The limitations below are deliberate scope cuts rather than unknowns — each one is measured, reproducible, and reported by the eval suite instead of hidden.
 
+A graceful-degradation defect listed here at submission — a *stopped* specialist container returning 503 after the gateway ceiling instead of a degraded 200 — was fixed on 2026-08-21, after the assignment was submitted. The submitted revision is tagged `submission-2026-08-21`; root cause and measurements are in [WALKTHROUGH.md](WALKTHROUGH.md#failure-handling).
+
 LLM spend is treated as a budget to engineer against. The offline suite (`make test`) and the routing/QA/trap evals (`make eval`) run entirely on `StubProvider` — no API key, no network — so CI and day-to-day iteration cost nothing, and live evaluation stays a deliberate, infrequent step ($2.14 for a full 58-turn run). That separation is what kept the regression in [docs/regression-2026-08-20.md](docs/regression-2026-08-20.md) cheap to diagnose: a live run surfaced it, but the offline suite localised it to one Cypher lookup and verified every candidate fix at zero API cost, so only the confirming run cost money. At runtime the orchestrator enforces per-request token and USD ceilings (`ORCH_REQUEST_TOKEN_BUDGET`, `ORCH_REQUEST_COST_USD_MAX`) and falls back to evidence already gathered when one trips.
 
 ---
@@ -136,7 +138,6 @@ LLM spend is treated as a budget to engineer against. The offline suite (`make t
 
 | Limitation | Detail |
 | --- | --- |
-| Specialist outage (open defect) | A *stopped* specialist container makes `/api/chat` return 503 after the 90s gateway ceiling instead of the intended degraded 200. Specialist and synthesis timeouts now use the cancellation-safe helper in `core/resilience/retry.py`, and the pool no longer leaks a slot per abandoned call; the remaining cause is anyio cancel-scope teardown in the MCP client killing the request task without writing a response. `/api/agents/health` reports the outage correctly |
 | Best-effort `CALLS` | Edges resolved by callee name only; no cross-module type inference |
 | `find_patterns` | Three fixed patterns: `decorator`, `dependency_injection`, `factory` |
 | Incremental indexing | File-granularity only; a single-line change reindexes the whole file. `mode=full` is the escape hatch |

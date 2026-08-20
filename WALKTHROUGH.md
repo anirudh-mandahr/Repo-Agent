@@ -77,7 +77,7 @@ flowchart TB
 
 **Degradation instead of a 500.** Partial results are never thrown away. When a specialist returns an error, its `degraded_note` is recorded and the answer is assembled from whatever Graph Query already found, marked `degraded: true`. Bad routing is a 422. Retrieval that succeeded is not discarded because synthesis timed out: the evidence is rendered as markdown and marked `evidence_only`.
 
-One case does not yet honour that contract: a specialist whose **container is stopped** returns 503 rather than a degraded 200. It is a live defect, not a scope cut — see [Failure handling](#failure-handling).
+One case did not honour that contract at submission time: a specialist whose **container is stopped** returned 503 rather than a degraded 200. It was a defect, not a scope cut, and it is now fixed — the recorded video and the submitted revision still show the 503. Root cause and evidence: [Failure handling](#failure-handling).
 
 **Security defaults for a compose demo.** Secrets are exported, not committed. Compose will not invent a Neo4j password. The gateway API key is also the MCP shared secret, so agents are not callable even on the Docker network. Clone URLs are allowlisted to HTTPS on github.com. Rate limiting covers HTTP routes and every WebSocket message.
 
@@ -398,18 +398,28 @@ curl -s "$GW/api/agents/health" -H "X-API-Key: $KEY" \
 
 Aggregate status drops to `degraded`, `code_analyst` reports `error`, and Indexer, Graph Query, and Memory stay `ok`. Orchestrator also reports `error` here: its own `health` tool fans out to the stopped specialist and overruns the gateway's 2s probe budget.
 
-**Known defect — chat during a specialist outage.** The intended contract is HTTP 200 with `degraded: true` and the graph evidence already gathered. A chat issued while `code_analyst` is stopped currently returns **HTTP 503** after the 90s gateway ceiling:
+Chat during the outage returns the contract: **HTTP 200**, `degraded: true`, and the graph evidence already gathered.
 
 ```bash
 curl -s -o /tmp/q-degraded.json -w 'HTTP %{http_code}\n' "$GW/api/chat" \
   -H 'Content-Type: application/json' \
   -H "X-API-Key: $KEY" \
   -d "{\"message\":\"How does dependency injection work and show me examples from the codebase (degraded demo)\",\"session_id\":\"$SESSION\"}"
+
+jq '{degraded: .done.degraded, answer: .answer[0:240]}' /tmp/q-degraded.json
 ```
 
-What was traced and fixed: the orchestrator's specialist calls and the streaming synthesis call both used `asyncio.wait_for`, which waits for a cancelled task to finish — so an MCP read that ignores cancellation held the request past every internal deadline. Both now use the cancellation-safe helper in `core/resilience/retry.py`, and the analyst timeout demonstrably fires (`orchestrator.analyst_task_failed`) with the plan completing on graph hits. The session pool separately leaked a slot on every abandoned call, and `collect_downstream_health` raced `pool.call` with a second timer of the same length, stranding a session on every probe until the bucket deadlocked. Both are fixed.
+Measured: HTTP 200 in 21.1s on a cold pool and 19.0s on a warm one, `degraded: true`, ~4,000-character answer built from graph hits alone. Retrieval that succeeded is never thrown away because something downstream failed.
 
-What remains: when the stopped container's DNS entry disappears, the connect failure unwinds through the MCP client's anyio task group and raises `RuntimeError: Attempted to exit cancel scope in a different task than it was entered in`. An `asyncio` task dump taken during the hang shows the request task is *gone* rather than blocked, so no MCP response is ever written and the caller waits for its own ceiling. The fix belongs at the point where a dead target is opened, so it yields a clean `AgentUnavailableError` instead of entering that teardown path.
+> **Fixed after submission.** This path returned **HTTP 503** after the 90s gateway ceiling in the submitted revision, and the recorded video shows that behaviour. The fix landed on 2026-08-21, after submission; it is described below and tagged in git as the first commit after [`submission-2026-08-21`](#).
+
+**Root cause.** Three defects stacked, and only the third produced the 503.
+
+The orchestrator's specialist calls and the streaming synthesis call both used `asyncio.wait_for`, which waits for a cancelled task to finish — an MCP read that ignores cancellation held the request past every internal deadline. Both now use the cancellation-safe helper in `core/resilience/retry.py`. Separately, the session pool leaked a slot on every abandoned call, and `collect_downstream_health` raced `pool.call` with a second timer of the same length, stranding a session per probe until the bucket deadlocked.
+
+With those fixed the 503 persisted, and the real cause was one exception class. `open_streamable_http_session` wrapped its setup in `except Exception`. The MCP client issues the `initialize` POST from a **child task** inside an `anyio` task group; when the stopped container's DNS entry is gone that child raises `ConnectError`, and anyio cancels the group's scope to unwind — delivering a bare `CancelledError` into the task awaiting `session.initialize()`. `CancelledError` derives from `BaseException`, so the handler never ran: the exit stack was never unwound in the task that entered it, and the cancellation escaped and killed the orchestrator's request task without writing a response. That is why an `asyncio` task dump taken during the hang showed the request task *gone* rather than blocked, and why the caller waited its full ceiling — 90.02s against a 90s `GATEWAY_CHAT_TIMEOUT_S`. The `RuntimeError: Attempted to exit cancel scope in a different task than it was entered in` was the wreckage of the orphaned stack being closed later from the pool's cleanup task, not the cause.
+
+The fix catches `BaseException`, unwinds the stack in the entering task — which uncancels it and re-raises the underlying `ConnectError` — and translates that into a transient `ConnectionError` the existing degradation path already handles. `core/resilience/retry.py` distinguishes the same case defensively: a child that comes back cancelled when the caller was not cancelling it is transport teardown, not our timeout. Genuine caller cancellation still propagates as `CancelledError`; three regression tests in `core/tests/test_orchestration.py` pin both directions.
 
 Restore Code Analyst before moving on:
 
@@ -423,11 +433,10 @@ The synthesis-timeout policy is unaffected: evidence already gathered is rendere
 
 ## What is deliberately unfinished
 
-Scope cuts, each measured and reported by the eval suite rather than hidden — plus one open defect, listed first because it is a bug rather than a decision.
+Scope cuts, each measured and reported by the eval suite rather than hidden. The one entry that was a bug rather than a decision — a stopped specialist returning 503 instead of a degraded 200 — was fixed after submission; see [Failure handling](#failure-handling).
 
 | Limitation | Detail |
 | --- | --- |
-| **Specialist outage (defect)** | A *stopped* specialist container returns 503 after the 90s ceiling instead of a degraded 200. Timeout handling and pool-slot leaks are fixed; the remaining cause is anyio cancel-scope teardown in the MCP client killing the request task without a response. Health reporting is unaffected |
 | `CALLS` edges | Resolved by callee name; no cross-module type inference |
 | `find_patterns` | Three templates: decorator, dependency injection, factory |
 | Incremental index | Per file, not per line |
