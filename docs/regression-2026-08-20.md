@@ -6,14 +6,14 @@ routing `anthropic/claude-sonnet-4.5`, synthesis `openai/gpt-4.1-mini`.
 | State | What it is |
 | --- | --- |
 | **A — baseline** | The previous session's live run, $1.8904 (`baseline-before/`) |
-| **B — your fixes** | + entity-resolution / correlation-id / MCP-timeout fixes (`after-fixes/`) |
+| **B — new fixes** | + entity-resolution / correlation-id / MCP-timeout fixes (`after-fixes/`) |
 | **C — final** | + the two fixes made in this session (`final-live/`) |
 
 ## Headline: the regression was real, and worse than the scorecard suggested
 
 Live A -> B:
 
-| Metric | A (baseline) | B (your fixes) | Delta |
+| Metric | A (baseline) | B (new fixes) | Delta |
 | --- | ---: | ---: | ---: |
 | Tokens | 967,385 | 867,434 | **-99,951 (-10%)** |
 | Cost | $1.8904 | $2.3268 | **+$0.4364 (+23%)** |
