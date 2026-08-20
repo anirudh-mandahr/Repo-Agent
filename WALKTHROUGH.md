@@ -75,7 +75,9 @@ flowchart TB
 
 **Typed graph, not properties stuffed onto a file.** Nodes: Module, Class, Function, Method, Parameter, Decorator, Import, Docstring, File, plus Meta for `index_version`. Relationships: CONTAINS, IMPORTS, INHERITS_FROM, CALLS, DECORATED_BY, HAS_PARAMETER, DOCUMENTED_BY, DEPENDS_ON.
 
-**Degradation instead of a 500.** If a specialist dies, the query still returns HTTP 200 with `degraded: true` and whatever Graph Query already found. Orchestrator unreachable is a 503. Bad routing is a 422. Successful retrieval is never thrown away because synthesis timed out: the evidence is rendered as markdown and marked `evidence_only`.
+**Degradation instead of a 500.** Partial results are never thrown away. When a specialist returns an error, its `degraded_note` is recorded and the answer is assembled from whatever Graph Query already found, marked `degraded: true`. Bad routing is a 422. Retrieval that succeeded is not discarded because synthesis timed out: the evidence is rendered as markdown and marked `evidence_only`.
+
+One case does not yet honour that contract: a specialist whose **container is stopped** returns 503 rather than a degraded 200. It is a live defect, not a scope cut — see [Failure handling](#failure-handling).
 
 **Security defaults for a compose demo.** Secrets are exported, not committed. Compose will not invent a Neo4j password. The gateway API key is also the MCP shared secret, so agents are not callable even on the Docker network. Clone URLs are allowlisted to HTTPS on github.com. Rate limiting covers HTTP routes and every WebSocket message.
 
@@ -383,36 +385,49 @@ Counters that matter in production: latency by route, synthesis duration, time t
 
 There is no dashboard. JSON logs, one correlation id, grep, and these counters.
 
-### Failure handling on camera
+### Failure handling
 
-If a specialist dies, the contract is HTTP 200, `degraded: true`, and a non-empty answer from whatever Graph Query already found. Health probes are MCP `health` tools, so a stopped container fails honestly.
+Health probes are MCP `health` tools rather than TCP checks, so a stopped container fails honestly instead of showing a green port on a dead process.
 
 ```bash
 docker compose stop code_analyst
 sleep 2
-curl -s "$GW/api/agents/health" | jq .
+curl -s "$GW/api/agents/health" -H "X-API-Key: $KEY" \
+  | jq '{status, agents: (.agents|map_values(.status))}'
+```
 
-# Unique wording so the cache cannot serve the old good answer
+Aggregate status drops to `degraded`, `code_analyst` reports `error`, and Indexer, Graph Query, and Memory stay `ok`. Orchestrator also reports `error` here: its own `health` tool fans out to the stopped specialist and overruns the gateway's 2s probe budget.
+
+**Known defect — chat during a specialist outage.** The intended contract is HTTP 200 with `degraded: true` and the graph evidence already gathered. A chat issued while `code_analyst` is stopped currently returns **HTTP 503** after the 90s gateway ceiling:
+
+```bash
 curl -s -o /tmp/q-degraded.json -w 'HTTP %{http_code}\n' "$GW/api/chat" \
   -H 'Content-Type: application/json' \
   -H "X-API-Key: $KEY" \
   -d "{\"message\":\"How does dependency injection work and show me examples from the codebase (degraded demo)\",\"session_id\":\"$SESSION\"}"
+```
 
-jq '{degraded: .done.degraded, answer: .answer[0:240]}' /tmp/q-degraded.json
+What was traced and fixed: the orchestrator's specialist calls and the streaming synthesis call both used `asyncio.wait_for`, which waits for a cancelled task to finish — so an MCP read that ignores cancellation held the request past every internal deadline. Both now use the cancellation-safe helper in `core/resilience/retry.py`, and the analyst timeout demonstrably fires (`orchestrator.analyst_task_failed`) with the plan completing on graph hits. The session pool separately leaked a slot on every abandoned call, and `collect_downstream_health` raced `pool.call` with a second timer of the same length, stranding a session on every probe until the bucket deadlocked. Both are fixed.
 
+What remains: when the stopped container's DNS entry disappears, the connect failure unwinds through the MCP client's anyio task group and raises `RuntimeError: Attempted to exit cancel scope in a different task than it was entered in`. An `asyncio` task dump taken during the hang shows the request task is *gone* rather than blocked, so no MCP response is ever written and the caller waits for its own ceiling. The fix belongs at the point where a dead target is opened, so it yields a clean `AgentUnavailableError` instead of entering that teardown path.
+
+Restore Code Analyst before moving on:
+
+```bash
 docker compose start code_analyst
 ```
 
-Restore Code Analyst before leaving this demo. Same policy if the synthesis LLM times out: render the evidence already gathered as markdown, mark `evidence_only`.
+The synthesis-timeout policy is unaffected: evidence already gathered is rendered as markdown and marked `evidence_only`.
 
 ---
 
 ## What is deliberately unfinished
 
-These are scope cuts, each measured and reported by the eval suite rather than hidden.
+Scope cuts, each measured and reported by the eval suite rather than hidden — plus one open defect, listed first because it is a bug rather than a decision.
 
 | Limitation | Detail |
 | --- | --- |
+| **Specialist outage (defect)** | A *stopped* specialist container returns 503 after the 90s ceiling instead of a degraded 200. Timeout handling and pool-slot leaks are fixed; the remaining cause is anyio cancel-scope teardown in the MCP client killing the request task without a response. Health reporting is unaffected |
 | `CALLS` edges | Resolved by callee name; no cross-module type inference |
 | `find_patterns` | Three templates: decorator, dependency injection, factory |
 | Incremental index | Per file, not per line |
@@ -443,4 +458,4 @@ curl -s http://localhost:8000/api/chat \
   -d '{"message":"What is the FastAPI class?","session_id":"demo-1"}' | jq .
 ```
 
-Five MCP servers, one graph, one correlation id, citations that resolve, and a 200 with `degraded` when a specialist falls over.
+Five MCP servers, one graph, one correlation id, and citations that resolve to real nodes.

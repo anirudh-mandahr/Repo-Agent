@@ -136,6 +136,7 @@ LLM spend is treated as a budget to engineer against. The offline suite (`make t
 
 | Limitation | Detail |
 | --- | --- |
+| Specialist outage (open defect) | A *stopped* specialist container makes `/api/chat` return 503 after the 90s gateway ceiling instead of the intended degraded 200. Specialist and synthesis timeouts now use the cancellation-safe helper in `core/resilience/retry.py`, and the pool no longer leaks a slot per abandoned call; the remaining cause is anyio cancel-scope teardown in the MCP client killing the request task without writing a response. `/api/agents/health` reports the outage correctly |
 | Best-effort `CALLS` | Edges resolved by callee name only; no cross-module type inference |
 | `find_patterns` | Three fixed patterns: `decorator`, `dependency_injection`, `factory` |
 | Incremental indexing | File-granularity only; a single-line change reindexes the whole file. `mode=full` is the escape hatch |
