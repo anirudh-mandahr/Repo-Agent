@@ -411,7 +411,7 @@ jq '{degraded: .done.degraded, answer: .answer[0:240]}' /tmp/q-degraded.json
 
 Measured: HTTP 200 in 21.1s on a cold pool and 19.0s on a warm one, `degraded: true`, ~4,000-character answer built from graph hits alone. Retrieval that succeeded is never thrown away because something downstream failed.
 
-> **Fixed after submission.** This path returned **HTTP 503** after the 90s gateway ceiling in the submitted revision, and the recorded video shows that behaviour. The fix landed on 2026-08-21, after submission; it is described below and tagged in git as the first commit after [`submission-2026-08-21`](#).
+> **Fixed after submission.** This path returned **HTTP 503** after the 90s gateway ceiling in the submitted revision, and the recorded video shows that behaviour. The fix landed on 2026-08-21, after submission; it is described below, and the submitted revision is tagged `submission-2026-08-21` so the graded state stays reproducible.
 
 **Root cause.** Three defects stacked, and only the third produced the 503.
 
