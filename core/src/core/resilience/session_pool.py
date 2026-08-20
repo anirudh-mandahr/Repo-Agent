@@ -83,10 +83,26 @@ class _AgentSessionBucket:
         self._size = 0
         self._closed = False
         self._cond = asyncio.Condition()
+        self._closing: set[asyncio.Task[None]] = set()
 
-    async def acquire(self, *, correlation_id: str) -> tuple[ToolSession, bool]:
-        """Return ``(session, reused)``; ``reused`` is True for idle-queue hits."""
+    async def acquire(
+        self, *, correlation_id: str, timeout_s: float | None = None
+    ) -> tuple[ToolSession, bool]:
+        """Return ``(session, reused)``; ``reused`` is True for idle-queue hits.
+
+        Waiting for a free slot is bounded by ``timeout_s``. A caller whose task
+        is abandoned mid-call never returns its session, so without a bound the
+        bucket would deadlock every later caller once enough slots had been
+        stranded that way -- turning one dead specialist into a dead agent.
+
+        Raises:
+            AgentUnavailableError: The pool is closed, or no slot came free in
+                ``timeout_s``.
+        """
         created = False
+        deadline = (
+            None if timeout_s is None else asyncio.get_running_loop().time() + timeout_s
+        )
         async with self._cond:
             while True:
                 if self._closed:
@@ -101,7 +117,23 @@ class _AgentSessionBucket:
                     self._size += 1
                     created = True
                     break
-                await self._cond.wait()
+                if deadline is None:
+                    await self._cond.wait()
+                    continue
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise AgentUnavailableError(
+                        agent=self._agent,
+                        correlation_id=correlation_id,
+                        message=(
+                            f"mcp pool exhausted for {self._agent}; "
+                            f"no session free after {timeout_s}s"
+                        ),
+                    )
+                try:
+                    await asyncio.wait_for(self._cond.wait(), timeout=remaining)
+                except TimeoutError:
+                    continue
         if created:
             try:
                 session = await self._opener()
@@ -155,6 +187,19 @@ class _AgentSessionBucket:
             self._size = max(0, self._size - 1)
             self._cond.notify()
         await self._close_quietly(session)
+
+    def discard_nowait(self, session: ToolSession) -> None:
+        """Reclaim ``session``'s slot without waiting for it to close.
+
+        Used when a call timed out and its task was abandoned: that task will
+        never release the session, so the slot would leak and the bucket would
+        deadlock once every slot had been lost that way. ``drop`` frees the slot
+        before awaiting the close, and closing an abandoned MCP session can
+        itself hang, so it runs detached.
+        """
+        task = asyncio.create_task(self.drop(session))
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
 
     async def purge_idle(self) -> None:
         """Drop every idle session; used when a reused session proves stale."""
@@ -278,6 +323,9 @@ class AgentSessionPool:
                 message=f"mcp pool closed; cannot call {agent}.{tool}",
             )
         breaker = self.breakers.get(agent)
+        # A timed-out call has its task abandoned mid-flight, so it can never
+        # release the session it holds. Track it here to reclaim the slot.
+        in_flight: list[ToolSession] = []
 
         async def _once() -> Any:
             return await self._call_with_session(
@@ -286,6 +334,8 @@ class AgentSessionPool:
                 arguments,
                 correlation_id,
                 progress_callback=progress_callback,
+                in_flight=in_flight,
+                acquire_timeout_s=timeout_s,
             )
 
         from core.observability.metrics import observe_request
@@ -309,6 +359,10 @@ class AgentSessionPool:
         except CircuitBreakerOpenError:
             raise
         except (TimeoutError, ConnectionError, OSError, AgentUnavailableError) as exc:
+            bucket = self._buckets.get(agent)
+            if bucket is not None:
+                for stranded in in_flight:
+                    bucket.discard_nowait(stranded)
             raise AgentUnavailableError(
                 agent=agent,
                 correlation_id=correlation_id,
@@ -344,10 +398,22 @@ class AgentSessionPool:
         correlation_id: str,
         *,
         progress_callback: ProgressCallback | None = None,
+        in_flight: list[ToolSession] | None = None,
+        acquire_timeout_s: float | None = None,
     ) -> Any:
         bucket = self._bucket(agent)
-        session, reused = await bucket.acquire(correlation_id=correlation_id)
+        session, reused = await bucket.acquire(
+            correlation_id=correlation_id, timeout_s=acquire_timeout_s
+        )
+        if in_flight is not None:
+            in_flight.append(session)
         self._call_counts[agent] = self._call_counts.get(agent, 0) + 1
+
+        def _untrack(done: ToolSession) -> None:
+            """Stop tracking a session this call has already handed back."""
+            if in_flight is not None and done in in_flight:
+                in_flight.remove(done)
+
         try:
             result = await self._invoke_session(
                 session,
@@ -358,6 +424,7 @@ class AgentSessionPool:
             )
         except Exception as exc:
             await bucket.drop(session)
+            _untrack(session)
             if not reused:
                 raise
             # Idle sessions opened in an earlier request task can be broken by
@@ -370,7 +437,11 @@ class AgentSessionPool:
                 error=str(exc),
             )
             await bucket.purge_idle()
-            session, _ = await bucket.acquire(correlation_id=correlation_id)
+            session, _ = await bucket.acquire(
+                correlation_id=correlation_id, timeout_s=acquire_timeout_s
+            )
+            if in_flight is not None:
+                in_flight.append(session)
             try:
                 result = await self._invoke_session(
                     session,
@@ -381,8 +452,10 @@ class AgentSessionPool:
                 )
             except Exception:
                 await bucket.drop(session)
+                _untrack(session)
                 raise
         await bucket.release(session)
+        _untrack(session)
         return result
 
     async def _invoke_session(

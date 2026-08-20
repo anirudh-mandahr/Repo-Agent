@@ -242,16 +242,18 @@ async def collect_downstream_health(
 
     async def _one(name: str) -> HealthStatus:
         try:
-            payload = await asyncio.wait_for(
-                pool.call(
-                    name,
-                    "health",
-                    {},
-                    correlation_id="health",
-                    timeout_s=timeout_s,
-                    retry_count=0,
-                ),
-                timeout=timeout_s,
+            # No outer wait_for: pool.call already bounds this at timeout_s, and
+            # a second timer of the same length would race it. When the outer
+            # one won, the pool never ran its own cleanup and the session it
+            # held was stranded -- leaking a slot on every probe until the
+            # bucket was exhausted and every later caller blocked.
+            payload = await pool.call(
+                name,
+                "health",
+                {},
+                correlation_id="health",
+                timeout_s=timeout_s,
+                retry_count=0,
             )
             return _coerce_health(name, payload)
         except Exception as exc:

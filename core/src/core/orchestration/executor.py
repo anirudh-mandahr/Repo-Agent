@@ -15,6 +15,7 @@ from core.observability.ledger import TokenLedger, record_payload_usage
 from core.querying.patterns import SUPPORTED_PATTERNS, pattern_path_prefix
 from core.querying.service import retrieval_sort_key
 from core.querying.templates import DEFAULT_TRACE_DEPTH
+from core.resilience.retry import await_with_timeout_retry
 from core.settings import OrchestratorSettings
 
 from .budget import RequestBudget
@@ -552,7 +553,15 @@ async def run_plan(
         timeout = min(timeout_s, remaining) if budget is not None else timeout_s
         if timeout <= 0:
             raise _BudgetSkip()
-        result = await asyncio.wait_for(factory(), timeout=timeout)
+        # MCP streamable-HTTP reads can ignore cancellation (anyio cancel
+        # scopes), and asyncio.wait_for waits for the cancelled task to
+        # finish -- a dead specialist would hang the whole request past the
+        # gateway ceiling. This helper abandons a stuck task instead.
+        result = await await_with_timeout_retry(
+            factory,
+            timeout_s=timeout,
+            retry_count=0,
+        )
         record_payload_usage(token_ledger, correlation_id, result)
         return result
 

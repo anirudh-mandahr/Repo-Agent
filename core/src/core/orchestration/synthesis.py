@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import re
 import time
@@ -14,6 +13,7 @@ from core.logging import get_logger
 from core.memory import ConversationContext
 from core.observability.ledger import TokenLedger
 from core.querying.service import proper_noun_tokens
+from core.resilience.retry import await_with_timeout_retry
 from core.settings import OrchestratorSettings
 
 from .budget import RequestBudget
@@ -591,13 +591,18 @@ async def synthesize_response(
         )
 
     try:
-        result = await asyncio.wait_for(
-            _complete_synthesis(
+        # Streaming LLM reads can ignore cancellation, and asyncio.wait_for
+        # waits for the cancelled task to finish -- a stalled stream would hang
+        # the request past the gateway ceiling instead of falling back to the
+        # evidence we already have. This helper abandons a stuck task instead.
+        result = await await_with_timeout_retry(
+            lambda: _complete_synthesis(
                 llm_provider,
                 llm_messages,
                 on_delta=_emit,
             ),
-            timeout=timeout,
+            timeout_s=timeout,
+            retry_count=0,
         )
     except Exception as exc:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
