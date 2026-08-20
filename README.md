@@ -155,6 +155,7 @@ LLM spend is treated as a budget to engineer against. The offline suite (`make t
 
 | Document | Contents |
 | --- | --- |
+| [WALKTHROUGH.md](WALKTHROUGH.md) | Written submission walkthrough: architecture, setup, indexing, sample queries, MCP/synthesis, observability |
 | [docs/architecture.md](docs/architecture.md) | System and sequence diagrams, per-agent tools and design points, graph schema |
 | [docs/design-decisions.md](docs/design-decisions.md) | Trade-off catalogue with rejected alternatives; request budget and latency hierarchy |
 | [docs/configuration.md](docs/configuration.md) | Every environment variable per agent, make targets, secret precedence |
