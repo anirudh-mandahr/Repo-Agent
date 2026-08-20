@@ -1484,6 +1484,52 @@ async def test_await_with_timeout_retry_abandons_uncancellable_task() -> None:
 
 
 @pytest.mark.asyncio
+async def test_await_with_timeout_retry_translates_transport_cancellation() -> None:
+    """A child cancelled from inside the MCP client must not kill the caller.
+
+    A dead specialist makes the MCP client's anyio task group cancel its scope,
+    which surfaces as a bare ``CancelledError``. Propagating it would kill the
+    request task without a response and the gateway would time out into a 503
+    instead of returning a degraded 200.
+    """
+    from core.resilience.retry import await_with_timeout_retry
+
+    async def transport_teardown() -> str:
+        raise asyncio.CancelledError("Cancelled via cancel scope")
+
+    with pytest.raises(ConnectionError, match="transport teardown"):
+        await await_with_timeout_retry(transport_teardown, timeout_s=5.0, retry_count=0)
+
+
+@pytest.mark.asyncio
+async def test_await_with_timeout_retry_propagates_caller_cancellation() -> None:
+    """Cancelling the caller must still cancel, not turn into ConnectionError."""
+    from core.resilience.retry import await_with_timeout_retry
+
+    async def slow() -> str:
+        await asyncio.sleep(30)
+        return "never"
+
+    async def run() -> str:
+        return await await_with_timeout_retry(slow, timeout_s=60.0, retry_count=0)
+
+    task = asyncio.create_task(run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_open_streamable_http_session_reports_dead_endpoint() -> None:
+    """A dead endpoint yields a transient error, never a bare CancelledError."""
+    from core.mcp.client import open_streamable_http_session
+
+    with pytest.raises(ConnectionError, match="mcp session setup failed"):
+        await open_streamable_http_session("http://127.0.0.1:9/mcp")
+
+
+@pytest.mark.asyncio
 async def test_empty_entities_still_retrieve_from_the_query_text() -> None:
     llm = StubProvider(
         [

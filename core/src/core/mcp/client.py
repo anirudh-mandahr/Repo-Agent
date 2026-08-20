@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
@@ -83,8 +84,32 @@ async def open_streamable_http_session(url: str) -> ToolSession:
         )
         session = await stack.enter_async_context(ClientSession(read, write))
         await session.initialize()
-    except Exception:
-        await stack.aclose()
+    except BaseException as exc:
+        # A dead endpoint does not fail here with a ConnectError. The task
+        # group inside streamable_http_client sends the first request from a
+        # child task; when that child hits a connect failure, anyio cancels
+        # the group's scope, which surfaces in *this* task as a bare
+        # CancelledError at ``session.initialize()``. An ``except Exception``
+        # would miss it, leaving the scope orphaned -- and an orphaned scope
+        # later cancels whatever this task is doing, killing the request
+        # without a response. Unwind the stack in this same task: the task
+        # group's exit uncancels the task and re-raises the real transport
+        # error, which we translate into a transient ConnectionError.
+        try:
+            await stack.aclose()
+        except asyncio.CancelledError:
+            raise
+        except BaseException as close_exc:
+            raise ConnectionError(
+                f"mcp session setup failed for {url}: {close_exc!r}"
+            ) from close_exc
+        current = asyncio.current_task()
+        if isinstance(exc, asyncio.CancelledError) and (
+            current is None or not current.cancelling()
+        ):
+            # Scope-driven cancellation whose transport error was already
+            # consumed during unwind; the caller was not cancelled.
+            raise ConnectionError(f"mcp session setup failed for {url}") from exc
         raise
     return StreamableHttpSession(stack=stack, session=session)
 

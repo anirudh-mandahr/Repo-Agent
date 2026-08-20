@@ -70,6 +70,25 @@ async def await_with_timeout_retry[T](
             continue
         try:
             return task.result()
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise  # the caller itself is being cancelled
+            # The child task was cancelled from inside the MCP client (anyio
+            # cancel-scope teardown), not by us -- we only cancel on timeout,
+            # and then we never read the result. Re-raising would cancel the
+            # request task without a response; treat it as a transient
+            # transport failure instead.
+            last_exc = ConnectionError("mcp call cancelled by transport teardown")
+            if attempt + 1 >= attempts:
+                raise last_exc from None
+            log.warning(
+                "mcp.retry",
+                attempt=attempt + 1,
+                retry_count=retry_count,
+                error=str(last_exc),
+            )
+            continue
         except transient as exc:
             last_exc = exc
             if attempt + 1 >= attempts:
