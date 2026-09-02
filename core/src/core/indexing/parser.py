@@ -36,6 +36,7 @@ class ParsedClass(BaseModel):
 
     name: str
     qualified_name: str
+    parent_qualified_name: str = ""
     bases: list[str]
     decorators: list[str] = Field(default_factory=list)
     line_start: int
@@ -49,6 +50,7 @@ class ParsedCallable(BaseModel):
 
     name: str
     qualified_name: str
+    parent_qualified_name: str = ""
     parameters: list[ParsedParameter]
     decorators: list[str]
     line_start: int
@@ -294,7 +296,11 @@ def extracted_graph_from_parsed(parsed: ParsedFile) -> ExtractedGraph:
             }
         )
         relationships.append(
-            {"type": "CONTAINS", "source": parsed.module, "target": cls.qualified_name}
+            {
+                "type": "CONTAINS",
+                "source": cls.parent_qualified_name or parsed.module,
+                "target": cls.qualified_name,
+            }
         )
         _emit_docstring(entities, relationships, cls.qualified_name, cls.docstring)
         _emit_decorators(entities, relationships, cls.qualified_name, cls.decorators)
@@ -304,9 +310,16 @@ def extracted_graph_from_parsed(parsed: ParsedFile) -> ExtractedGraph:
             )
 
     for fn in parsed.functions:
-        _emit_callable(entities, relationships, fn, "Function", parsed.path, parsed.module)
+        _emit_callable(
+            entities,
+            relationships,
+            fn,
+            "Function",
+            parsed.path,
+            fn.parent_qualified_name or parsed.module,
+        )
     for method in parsed.methods:
-        parent_qn = method.qualified_name.rsplit(".", 1)[0]
+        parent_qn = method.parent_qualified_name or method.qualified_name.rsplit(".", 1)[0]
         _emit_callable(entities, relationships, method, "Method", parsed.path, parent_qn)
 
     for imported in parsed.imports:
@@ -585,6 +598,37 @@ def _from_module(module: str | None, level: int) -> str | None:
     return module
 
 
+SCOPELESS_BLOCKS: tuple[type[ast.stmt], ...] = (
+    ast.If,
+    ast.For,
+    ast.AsyncFor,
+    ast.While,
+    ast.With,
+    ast.AsyncWith,
+    ast.Try,
+    ast.TryStar,
+    ast.Match,
+)
+
+
+def _block_bodies(node: ast.stmt) -> list[list[ast.stmt]]:
+    """Return the statement lists of a block that does not open a new scope.
+
+    ``if``, ``try``, ``with`` and friends nest statements without changing the
+    enclosing namespace, so definitions inside them belong to the same owner.
+    """
+    bodies: list[list[ast.stmt]] = []
+    for field in ("body", "orelse", "finalbody"):
+        value = getattr(node, field, None)
+        if isinstance(value, list):
+            bodies.append(value)
+    for handler in getattr(node, "handlers", []):
+        bodies.append(handler.body)
+    for case in getattr(node, "cases", []):
+        bodies.append(case.body)
+    return bodies
+
+
 def _collect_definitions(
     body: list[ast.stmt],
     *,
@@ -596,6 +640,17 @@ def _collect_definitions(
     calls: list[ParsedCall],
     source_lines: Sequence[str],
 ) -> None:
+    """Walk ``body``, recording definitions at every nesting depth.
+
+    Recurses into both class and function bodies, so a class or helper defined
+    inside a function is still a node. ``class_qn`` marks a *direct* class parent:
+    a callable is a Method only when its immediate parent is a class, so a closure
+    inside a method is a Function, not a Method.
+
+    Blocks that do not open a scope (``if``, ``try``, ``with``, loops, ``match``)
+    are walked with the namespace unchanged, so a definition guarded by
+    ``if TYPE_CHECKING:`` or declared inside a ``try`` is still recorded.
+    """
     for node in body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             parsed = _parse_callable(node, namespace, source_lines)
@@ -607,6 +662,16 @@ def _collect_definitions(
                 calls.append(
                     ParsedCall(caller_qualified_name=parsed.qualified_name, callee=callee)
                 )
+            _collect_definitions(
+                node.body,
+                namespace=parsed.qualified_name,
+                class_qn=None,
+                classes=classes,
+                functions=functions,
+                methods=methods,
+                calls=calls,
+                source_lines=source_lines,
+            )
         elif isinstance(node, ast.ClassDef):
             qn = _join_qn(namespace, node.name)
             start, end = _span(node)
@@ -614,6 +679,7 @@ def _collect_definitions(
                 ParsedClass(
                     name=node.name,
                     qualified_name=qn,
+                    parent_qualified_name=namespace,
                     bases=[_as_written(base) for base in node.bases],
                     decorators=[_decorator_name(dec) for dec in node.decorator_list],
                     line_start=start,
@@ -632,6 +698,18 @@ def _collect_definitions(
                 calls=calls,
                 source_lines=source_lines,
             )
+        elif isinstance(node, SCOPELESS_BLOCKS):
+            for block in _block_bodies(node):
+                _collect_definitions(
+                    block,
+                    namespace=namespace,
+                    class_qn=class_qn,
+                    classes=classes,
+                    functions=functions,
+                    methods=methods,
+                    calls=calls,
+                    source_lines=source_lines,
+                )
 
 
 def _parse_callable(
@@ -643,6 +721,7 @@ def _parse_callable(
     return ParsedCallable(
         name=node.name,
         qualified_name=_join_qn(namespace, node.name),
+        parent_qualified_name=namespace,
         parameters=_parse_parameters(node.args),
         decorators=[_decorator_name(dec) for dec in node.decorator_list],
         line_start=start,
@@ -730,27 +809,36 @@ def _collect_calls(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]
 
 
 class _CallCollector(ast.NodeVisitor):
-    """Collect ``Name`` / ``Attribute`` callees, including nested function bodies."""
+    """Collect ``Name`` / ``Attribute`` callees for one callable's own body.
+
+    Nested ``def``/``class`` bodies are skipped: they are collected as their own
+    nodes, and each callable owns only the calls it makes directly.
+
+    A call whose attribute chain does not bottom out in a plain name --
+    ``super().__init__()``, ``make()().run()``, ``items[0].get()`` -- is skipped
+    too. Recording only the trailing ``__init__`` or ``get`` would invite the
+    resolver to link it to an unrelated same-named callable.
+    """
 
     def __init__(self) -> None:
         """Create a visitor that records callee names."""
         self.calls: list[str] = []
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        """Visit functiondef.
+        """Skip a nested function body; it is collected as its own node.
         
         Args:
             node: ast.FunctionDef.
         """
-        self.generic_visit(node)
+        return
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        """Visit asyncfunctiondef.
+        """Skip a nested async function body; it is collected as its own node.
         
         Args:
             node: ast.AsyncFunctionDef.
         """
-        self.generic_visit(node)
+        return
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         """Visit classdef.
@@ -766,10 +854,19 @@ class _CallCollector(ast.NodeVisitor):
         Args:
             node: ast.Call.
         """
-        name = _callee_name(node.func)
-        if name:
-            self.calls.append(name)
+        if _chain_root_is_name(node.func):
+            name = _callee_name(node.func)
+            if name:
+                self.calls.append(name)
         self.generic_visit(node)
+
+
+def _chain_root_is_name(func: ast.expr) -> bool:
+    """True when ``func`` is a name or an attribute chain rooted in a name."""
+    current = func
+    while isinstance(current, ast.Attribute):
+        current = current.value
+    return isinstance(current, ast.Name)
 
 
 def _callee_name(func: ast.expr) -> str | None:

@@ -31,7 +31,9 @@ from core.gateway import (
     ChatRequest,
     ChatResponse,
     GatewayDependencies,
+    IndexerGatewayClient,
     IndexJobAccepted,
+    IndexJobRecord,
     IndexJobRegistry,
     IndexJobStatus,
     IndexRequest,
@@ -66,6 +68,11 @@ _PUBLIC_PATHS = frozenset(
         "/openapi.json",
     }
 )
+# Grace for a cancelled dispatch to unwind; MCP reads can ignore cancellation.
+_DISPATCH_CANCEL_GRACE_S = 0.25
+# Consecutive unreachable status polls that, together with a failed dispatch,
+# are taken as proof the indexer is down rather than merely slow.
+_UNREACHABLE_POLL_LIMIT = 2
 _OPENAPI_TAGS = [
     {"name": "chat", "description": "Natural-language chat over the indexed repository."},
     {"name": "index", "description": "Background indexing jobs."},
@@ -569,6 +576,14 @@ def _ws_event(event: ChatEvent) -> dict[str, Any]:
 
 
 async def _run_index_job(app: FastAPI, job_id: str) -> None:
+    """Dispatch an index pass and follow it by polling the indexer.
+
+    An index outlives ``request_timeout_s`` by orders of magnitude, so awaiting
+    the dispatch reports failure for a run that is still going and will
+    succeed. The dispatch is fired and its transport timeout ignored;
+    ``get_index_status`` on the indexer, which owns the run, decides the
+    outcome.
+    """
     registry: IndexJobRegistry = app.state.job_registry
     record = registry.get(job_id)
     if record is None:
@@ -576,17 +591,121 @@ async def _run_index_job(app: FastAPI, job_id: str) -> None:
     record.status = "running"
     bind_correlation_id(record.correlation_id)
     deps: GatewayDependencies = app.state.gateway_deps
-    try:
-        report = await deps.specialists.indexer.index_repository(
+    gateway_settings: GatewaySettings = app.state.settings
+    indexer = deps.specialists.indexer
+
+    baseline = await _index_status(indexer, record.correlation_id)
+    dispatch = asyncio.create_task(
+        indexer.index_repository(
             repo_url=None,
             mode=record.mode,
             correlation_id=record.correlation_id,
         )
+    )
+    try:
+        record.report = await _follow_index_job(
+            indexer,
+            dispatch,
+            record=record,
+            settings=gateway_settings,
+            baseline=baseline,
+        )
         record.status = "done"
-        record.report = dict(report) if isinstance(report, dict) else {"result": report}
     except Exception as exc:
         record.status = "failed"
         record.error = str(exc)
+        log.error("index.job_failed", job_id=job_id, mode=record.mode, error=str(exc))
+    finally:
+        await _abandon_dispatch(dispatch)
+
+
+async def _follow_index_job(
+    indexer: IndexerGatewayClient,
+    dispatch: asyncio.Task[Any],
+    *,
+    record: IndexJobRecord,
+    settings: GatewaySettings,
+    baseline: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Poll until the indexer stops running, and return its report.
+
+    Raises:
+        TimeoutError: The pass exceeded ``index_timeout_s``, or never reported
+            itself running within ``index_start_grace_s``.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + settings.index_timeout_s
+    start_deadline = loop.time() + settings.index_start_grace_s
+    baseline_report = (baseline or {}).get("last_report")
+    dispatch_error: str | None = None
+    observed_running = False
+    unreachable = 0
+
+    while True:
+        if dispatch.done():
+            error = dispatch.exception()
+            if error is None:
+                # Short enough to finish inside one MCP round trip, or refused
+                # with already_running. Either way the call answered for itself.
+                return _as_report(dispatch.result())
+            # A timed-out dispatch says nothing about the run: expected here.
+            dispatch_error = dispatch_error or str(error)
+
+        status = await _index_status(indexer, record.correlation_id)
+        if status is None:
+            unreachable += 1
+            # The dispatch failed and the indexer cannot be reached to say
+            # otherwise. Nothing is running; waiting out the grace period would
+            # only delay the same answer and discard the useful error.
+            if dispatch_error and unreachable >= _UNREACHABLE_POLL_LIMIT:
+                raise RuntimeError(dispatch_error)
+        else:
+            unreachable = 0
+            if status.get("running"):
+                observed_running = True
+            elif observed_running or status.get("last_report") != baseline_report:
+                return _as_report(status.get("last_report"))
+
+        now = loop.time()
+        if now > deadline:
+            raise TimeoutError(f"index did not finish within {settings.index_timeout_s}s")
+        if not observed_running and now > start_deadline:
+            detail = f": {dispatch_error}" if dispatch_error else ""
+            raise TimeoutError(
+                f"indexer did not start within {settings.index_start_grace_s}s{detail}"
+            )
+        await asyncio.sleep(settings.index_poll_interval_s)
+
+
+async def _index_status(
+    indexer: IndexerGatewayClient, correlation_id: str
+) -> dict[str, Any] | None:
+    """Return the indexer's status, or None when it cannot be reached."""
+    try:
+        status = await indexer.get_index_status(correlation_id=correlation_id)
+    except Exception as exc:
+        log.warning("index.status_poll_failed", error=str(exc))
+        return None
+    return status if isinstance(status, dict) else None
+
+
+def _as_report(report: Any) -> dict[str, Any]:
+    if isinstance(report, dict):
+        return dict(report)
+    return {"result": report}
+
+
+async def _abandon_dispatch(dispatch: asyncio.Task[Any]) -> None:
+    """Drop the dispatch without its timeout surfacing as an unhandled error.
+
+    The indexer owns the run and keeps going regardless; nothing here waits on
+    it. Cancellation is given a short grace because MCP reads can ignore it.
+    """
+    if not dispatch.done():
+        dispatch.cancel()
+        await asyncio.wait({dispatch}, timeout=_DISPATCH_CANCEL_GRACE_S)
+    if dispatch.done() and not dispatch.cancelled():
+        dispatch.exception()
 
 
 app = create_app(settings)

@@ -1,6 +1,6 @@
 # Walkthrough — FastAPI Repository Chat Agent
 
-Written walkthrough for the assignment submission. It covers the six items the brief asks for: architecture and design decisions, setup, indexing, multi-agent queries, communication and synthesis, and observability.
+Written walkthrough covering architecture and design decisions, setup, indexing, multi-agent queries, communication and synthesis, and observability.
 
 A timed presenter script for a 10–15 minute recording lives in [docs/walkthrough.md](docs/walkthrough.md). This document is the readable version: you can follow it on a laptop, or treat each section as a chapter of a demo.
 
@@ -65,7 +65,7 @@ flowchart TB
 | **Code Analyst** | `:8004` | Asks Graph Query for coordinates, then reads source from `/repo`. Never opens Neo4j. |
 | **Memory** | `:8005` | SQLite session history plus an opaque response cache |
 
-### Design decisions that matter at review time
+### Design decisions that matter
 
 **Logic lives in `core/`; agent packages are thin FastMCP adapters.** Parsing, Cypher, routing, and prompts are framework-free. Unit tests (`make test`) need no Docker and no API key. The offline suite is 496 passed at 87.25% coverage against a 79% gate.
 
@@ -77,7 +77,7 @@ flowchart TB
 
 **Degradation instead of a 500.** Partial results are never thrown away. When a specialist returns an error, its `degraded_note` is recorded and the answer is assembled from whatever Graph Query already found, marked `degraded: true`. Bad routing is a 422. Retrieval that succeeded is not discarded because synthesis timed out: the evidence is rendered as markdown and marked `evidence_only`.
 
-One case did not honour that contract at submission time: a specialist whose **container is stopped** returned 503 rather than a degraded 200. It was a defect, not a scope cut, and it is now fixed — the recorded video and the submitted revision still show the 503. Root cause and evidence: [Failure handling](#failure-handling).
+One case did not honour that contract in an earlier revision: a specialist whose **container is stopped** returned 503 rather than a degraded 200. It was a defect, not a scope cut, and it is now fixed — the recorded video still shows the 503. Root cause and evidence: [Failure handling](#failure-handling).
 
 **Security defaults for a compose demo.** Secrets are exported, not committed. Compose will not invent a Neo4j password. The gateway API key is also the MCP shared secret, so agents are not callable even on the Docker network. Clone URLs are allowlisted to HTTPS on github.com. Rate limiting covers HTTP routes and every WebSocket message.
 
@@ -161,7 +161,7 @@ make prove-incremental
 
 ## 4. Example queries (multi-agent collaboration)
 
-These are the nine queries the assignment lists: two simple, three medium, four complex. Use a **fresh** session id. The response cache is keyed on session as well as the query, so a rehearsal run otherwise serves cached answers and latencies look fake.
+These nine queries span simple lookups through multi-agent synthesis: two simple, three medium, four complex. Use a **fresh** session id. The response cache is keyed on session as well as the query, so a rehearsal run otherwise serves cached answers and latencies look fake.
 
 ```bash
 export SESSION=demo-$(date +%s)
@@ -192,6 +192,13 @@ for q in "${Q[@]}"; do
 done
 ```
 
+'''
+jq -nc --arg m "What is the FastAPI class?" --arg s "$SESSION" '{message:$m,session_id:$s}' \
+| curl -s --max-time 180 "$GW/api/chat" \
+    -H 'Content-Type: application/json' -H "X-API-Key: $KEY" -d @- \
+| tee /tmp/one.json \
+| jq -r '.answer'
+'''
 Two columns matter: **routing mode** and **agent set**. That is the multi-agent claim in one line.
 
 Typical live routing (rules-first; seven of nine never touch the routing LLM):
@@ -411,7 +418,7 @@ jq '{degraded: .done.degraded, answer: .answer[0:240]}' /tmp/q-degraded.json
 
 Measured: HTTP 200 in 21.1s on a cold pool and 19.0s on a warm one, `degraded: true`, ~4,000-character answer built from graph hits alone. Retrieval that succeeded is never thrown away because something downstream failed.
 
-> **Fixed after submission.** This path returned **HTTP 503** after the 90s gateway ceiling in the submitted revision, and the recorded video shows that behaviour. The fix landed on 2026-08-21, after submission; it is described below, and the submitted revision is tagged `submission-2026-08-21` so the graded state stays reproducible.
+> **Fixed 2026-08-21.** This path previously returned **HTTP 503** after the 90s gateway ceiling, and the recorded video shows that behaviour. The fix is described below.
 
 **Root cause.** Three defects stacked, and only the third produced the 503.
 
@@ -433,7 +440,7 @@ The synthesis-timeout policy is unaffected: evidence already gathered is rendere
 
 ## What is deliberately unfinished
 
-Scope cuts, each measured and reported by the eval suite rather than hidden. The one entry that was a bug rather than a decision — a stopped specialist returning 503 instead of a degraded 200 — was fixed after submission; see [Failure handling](#failure-handling).
+Scope cuts, each measured and reported by the eval suite rather than hidden. The one entry that was a bug rather than a decision — a stopped specialist returning 503 instead of a degraded 200 — was fixed on 2026-08-21; see [Failure handling](#failure-handling).
 
 | Limitation | Detail |
 | --- | --- |

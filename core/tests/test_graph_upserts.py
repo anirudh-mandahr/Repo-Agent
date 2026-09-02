@@ -148,11 +148,23 @@ def test_upsert_contains_relationships_merge_on_qualified_names() -> None:
             }
         ]
     )
-    assert "MATCH (parent:Module {qualified_name: row.parent_qualified_name})" in class_cypher
+    # The common parent label is matched first...
+    assert (
+        "OPTIONAL MATCH (direct:Module {qualified_name: row.parent_qualified_name})"
+        in class_cypher
+    )
+    assert (
+        "OPTIONAL MATCH (direct:Class {qualified_name: row.parent_qualified_name})"
+        in method_cypher
+    )
     assert "MATCH (child:Class {qualified_name: row.child_qualified_name})" in class_cypher
-    assert "MERGE (parent)-[:CONTAINS]->(child)" in class_cypher
     assert "MATCH (child:Function {qualified_name: row.child_qualified_name})" in fn_cypher
-    assert "MATCH (parent:Class {qualified_name: row.parent_qualified_name})" in method_cypher
+    assert "MERGE (parent)-[:CONTAINS]->(child)" in class_cypher
+    # ...with a fallback so a definition nested inside another attaches to its real owner.
+    for cypher in (class_cypher, fn_cypher, method_cypher):
+        assert "coalesce(direct, nested) AS parent" in cypher
+        assert "nested:Function OR nested:Method" in cypher
+        assert "parent <> child" in cypher
     assert "DEFINES" not in class_cypher
     assert class_rows[0]["child_qualified_name"] == "fastapi.FastAPI"
 

@@ -436,11 +436,25 @@ def upsert_contains_methods(rows: Sequence[ContainsEntityRow | Mapping[str, Any]
 
 
 def _contains_cypher(parent_label: str, child_label: str) -> str:
+    """Build a CONTAINS batch whose parent may be any code entity.
+
+    ``parent_label`` is the common case (Module for classes and functions, Class
+    for methods) and is matched first. Nested definitions -- a class declared
+    inside a function, a closure inside a method -- have a Function, Method, or
+    Class parent instead, so the fallback matches those labels by qualified name.
+    """
     return dedent(
         f"""\
         UNWIND $rows AS row
-        MATCH (parent:{parent_label} {{qualified_name: row.parent_qualified_name}})
         MATCH (child:{child_label} {{qualified_name: row.child_qualified_name}})
+        OPTIONAL MATCH (direct:{parent_label} {{qualified_name: row.parent_qualified_name}})
+        OPTIONAL MATCH (nested)
+        WHERE direct IS NULL
+          AND nested.qualified_name = row.parent_qualified_name
+          AND (nested:{LABEL_MODULE} OR nested:{LABEL_CLASS}
+               OR nested:{LABEL_FUNCTION} OR nested:{LABEL_METHOD})
+        WITH child, coalesce(direct, nested) AS parent
+        WHERE parent IS NOT NULL AND parent <> child
         MERGE (parent)-[:{REL_CONTAINS}]->(child)
         """
     ).strip()

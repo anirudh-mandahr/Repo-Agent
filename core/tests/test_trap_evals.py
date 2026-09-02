@@ -229,3 +229,38 @@ async def test_trap_query_reports_out_of_codebase_without_fake_paths(query: str)
             # Incidental graph hits may reach the synthesizer; the answer still
             # must not invent FastAPI paths that are not in the index.
             assert "fastapi/" not in lowered
+
+
+def test_subject_tally_names_decorators_not_decorated_entities() -> None:
+    """Regression: the decorator pattern must report `property`, not `Route.path`."""
+    from core.analysis.models import PatternInstance
+    from core.analysis.service import _subject_tally
+
+    instances = [
+        PatternInstance(qualified_name="fastapi.routing.RouteContext.path", subject="property"),
+        PatternInstance(qualified_name="fastapi.routing.RouteContext.name", subject="property"),
+        PatternInstance(qualified_name="fastapi.routing._RouteCtx", subject="dataclass"),
+    ]
+    tally = _subject_tally(instances)
+    assert tally == ": property (2), dataclass (1)"
+    assert "RouteContext" not in tally
+    assert _subject_tally([PatternInstance(qualified_name="x")]) == ""
+
+
+def test_summary_states_the_tally_without_the_llm() -> None:
+    """The counts are a graph fact; they must not depend on the explanation model."""
+    from core.analysis.models import PatternInstance
+    from core.analysis.service import _with_subject_tally
+
+    instances = [
+        PatternInstance(qualified_name="m.A.path", subject="property"),
+        PatternInstance(qualified_name="m.A.name", subject="property"),
+        PatternInstance(qualified_name="m.Ctx", subject="dataclass"),
+    ]
+    stated = _with_subject_tally("They wrap route metadata.", "decorator", instances)
+    assert stated.startswith("Found 3 decorator applications: property (2), dataclass (1).")
+    assert stated.endswith("They wrap route metadata.")
+    # Still stated when the explanation model produced nothing.
+    assert _with_subject_tally("", "decorator", instances).startswith("Found 3")
+    # Patterns without a subject of their own are left alone.
+    assert _with_subject_tally("prose", "factory", [PatternInstance(qualified_name="x")]) == "prose"

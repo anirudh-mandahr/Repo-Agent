@@ -43,15 +43,22 @@ Source:
 """
 
 FIND_PATTERNS_SYSTEM = (
-    "You are a code analyst. Explain the listed structural-pattern instances "
-    "found in the knowledge graph. Write one overall summary of how the "
-    "pattern is used. Include per-instance explanations for at most 10 "
-    "representative instances; do not repeat the full instance list."
+    "You are a code analyst. Briefly explain how the listed structural pattern "
+    "is used, in at most three sentences. The caller already states which "
+    "subjects were found and how often, so do NOT re-list or re-count them, and "
+    "do not enumerate the instances. Instances read `<subject> on <entity>`: "
+    "the subject is the pattern itself (the decorator being applied), the entity "
+    "is what it was applied to -- never describe the entity as if it were the "
+    "subject. Add per-instance explanations only where they are not obvious, for "
+    "at most three instances."
 )
 
-FIND_PATTERNS_PROMPT = """Explain these instances of the '{pattern}' pattern.
+FIND_PATTERNS_PROMPT = """Explain how the '{pattern}' pattern is used here.
 
-Instances (sample; the full list is preserved separately):
+Subjects found, with counts (already reported to the user -- do not repeat): {subjects}
+
+Instances (sample; the full list is preserved separately), each written as
+`<subject> on <entity it applies to>`:
 {instances}
 """
 

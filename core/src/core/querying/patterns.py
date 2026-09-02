@@ -2,6 +2,10 @@
 
 User input is never interpolated into these strings. Patterns walk the spec
 schema (Decorator / Parameter nodes) rather than legacy node properties.
+
+Where a pattern has a name of its own -- the decorator being applied, say -- the
+template returns it as ``subject`` so callers can answer "which decorators are
+used" and not only "which things are decorated".
 """
 
 from __future__ import annotations
@@ -17,8 +21,8 @@ SUPPORTED_PATTERNS: tuple[str, ...] = (
 
 PATTERN_DECORATOR = dedent(
     """\
-    MATCH (n)-[:DECORATED_BY]->(:Decorator)
-    WHERE (n:Function OR n:Method)
+    MATCH (n)-[:DECORATED_BY]->(d:Decorator)
+    WHERE (n:Function OR n:Method OR n:Class)
       AND (
         $path_prefix IS NULL
         OR n.file_path STARTS WITH $path_prefix
@@ -28,7 +32,9 @@ PATTERN_DECORATOR = dedent(
     RETURN DISTINCT n.qualified_name AS qualified_name,
            n.file_path AS file_path,
            n.line_start AS line_start,
-           n.line_end AS line_end
+           n.line_end AS line_end,
+           d.name AS subject
+    ORDER BY subject, qualified_name
     """
 ).strip()
 

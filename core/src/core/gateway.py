@@ -295,6 +295,21 @@ class IndexerGatewayClient(Protocol):
         """
         ...
 
+    async def get_index_status(self, *, correlation_id: str) -> Any:
+        """Return the indexer's own view of the current pass.
+
+        The gateway cannot infer this from ``index_repository``: that call
+        outlives a single MCP round trip, so the indexer is the only component
+        that knows whether a pass is still running.
+
+        Args:
+            correlation_id: Request correlation id.
+
+        Returns:
+            Index status payload with ``running`` and ``last_report``.
+        """
+        ...
+
 
 class GatewaySpecialistClients(Protocol):
     """Specialist MCP clients used by gateway index and chat helpers."""

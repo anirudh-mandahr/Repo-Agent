@@ -15,6 +15,7 @@ from core.querying.embeddings import (
 )
 from core.querying.safety import QueryRejected
 from core.querying.service import (
+    DEFAULT_EMBEDDING_MIN_SCORE,
     DEFAULT_NEIGHBOR_BRANCH_LIMIT,
     DEFAULT_RESULT_LIMIT,
     READ_TIMEOUT_S,
@@ -445,6 +446,7 @@ def test_retrieve_lexical_tier_uses_vector_index() -> None:
         client,
         embeddings_enabled=True,
         embedding_provider=_TokenEmbedder(),
+        embedding_min_score=DEFAULT_EMBEDDING_MIN_SCORE,
     ).retrieve("how does dependency injection work")
     assert result.matches
     assert result.matches[0].tier == "lexical"
@@ -454,6 +456,77 @@ def test_retrieve_lexical_tier_uses_vector_index() -> None:
     ]
     assert vector_params
     assert len(vector_params[0]["query_vector"]) == 2
+    assert vector_params[0]["min_score"] == DEFAULT_EMBEDDING_MIN_SCORE
+
+
+def test_vectors_from_another_backend_disable_the_tier_instead_of_ranking_nonsense() -> None:
+    client = FakeClient(
+        by_query={
+            "n.name = $name OR n.qualified_name = $name": [],
+            "db.index.fulltext.queryNodes": [],
+            "m.value AS value": [{"value": "openrouter:openai/text-embedding-3-small:256"}],
+            "db.index.vector.queryNodes": [
+                {
+                    "labels": ["Function"],
+                    "name": "get_dependant",
+                    "qualified_name": "fastapi.dependencies.utils.get_dependant",
+                    "file_path": "fastapi/dependencies/utils.py",
+                    "line_start": 1,
+                    "line_end": 20,
+                    "score": 0.91,
+                }
+            ],
+        }
+    )
+    service = GraphQueryService(
+        client,
+        embeddings_enabled=True,
+        embedding_provider=HashingEmbeddingProvider(),
+    )
+    result = service.retrieve("how does dependency injection work")
+
+    assert not [hit for hit in result.matches if hit.tier == "lexical"]
+    assert not [query for query, _p, _t in client.queries if "vector.queryNodes" in query]
+
+
+def test_a_matching_backend_leaves_the_tier_enabled() -> None:
+    provider = HashingEmbeddingProvider()
+    client = FakeClient(
+        by_query={
+            "n.name = $name OR n.qualified_name = $name": [],
+            "db.index.fulltext.queryNodes": [],
+            "m.value AS value": [{"value": provider.fingerprint}],
+            "db.index.vector.queryNodes": [],
+        }
+    )
+    GraphQueryService(
+        client,
+        embeddings_enabled=True,
+        embedding_provider=provider,
+    ).retrieve("how does dependency injection work")
+
+    assert [query for query, _p, _t in client.queries if "vector.queryNodes" in query]
+
+
+def test_the_score_floor_follows_the_configured_backend() -> None:
+    client = FakeClient(
+        by_query={
+            "n.name = $name OR n.qualified_name = $name": [],
+            "db.index.fulltext.queryNodes": [],
+            "db.index.vector.queryNodes": [],
+        }
+    )
+    GraphQueryService(
+        client,
+        embeddings_enabled=True,
+        embedding_provider=_TokenEmbedder(),
+        embedding_min_score=0.7,
+    ).retrieve("how does dependency injection work")
+    vector_params = [
+        params for query, params, _timeout in client.queries if "vector.queryNodes" in query
+    ]
+    assert vector_params
+    assert all(params["min_score"] == 0.7 for params in vector_params)
 
 
 def test_retrieve_request_validation_and_di_queries_return_fastapi_entities() -> None:

@@ -180,3 +180,13 @@ def test_find_related_passes_relationship_type_as_parameter() -> None:
     assert "FastAPI" not in client.query
     assert "INHERITS_FROM" not in client.query or "$relationship_type" in client.query
     assert client.params == {"name": "FastAPI", "relationship_type": "INHERITS_FROM"}
+
+
+def test_decorator_pattern_returns_the_decorator_name() -> None:
+    """The question is which decorators are used, not which entities are decorated."""
+    cypher = patterns.pattern_cypher("decorator")
+    assert cypher is not None
+    assert "MATCH (n)-[:DECORATED_BY]->(d:Decorator)" in cypher
+    assert "d.name AS subject" in cypher
+    # Classes carry decorators too (@dataclass), so they must not be filtered out.
+    assert "n:Function OR n:Method OR n:Class" in cypher

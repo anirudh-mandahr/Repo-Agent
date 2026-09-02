@@ -41,6 +41,7 @@ def test_parse_sample_module_exactly() -> None:
             ParsedClass(
                 name="Base",
                 qualified_name="sample_module.Base",
+                parent_qualified_name="sample_module",
                 bases=[],
                 decorators=[],
                 line_start=7,
@@ -50,6 +51,7 @@ def test_parse_sample_module_exactly() -> None:
             ParsedClass(
                 name="Worker",
                 qualified_name="sample_module.Worker",
+                parent_qualified_name="sample_module",
                 bases=["Base"],
                 decorators=[],
                 line_start=17,
@@ -61,6 +63,7 @@ def test_parse_sample_module_exactly() -> None:
             ParsedCallable(
                 name="helper",
                 qualified_name="sample_module.helper",
+                parent_qualified_name="sample_module",
                 parameters=[
                     ParsedParameter(name="value", annotation="int", default=None, position=0)
                 ],
@@ -74,6 +77,7 @@ def test_parse_sample_module_exactly() -> None:
             ParsedCallable(
                 name="fetch_all",
                 qualified_name="sample_module.fetch_all",
+                parent_qualified_name="sample_module",
                 parameters=[
                     ParsedParameter(name="limit", annotation="int", default=None, position=0)
                 ],
@@ -87,6 +91,7 @@ def test_parse_sample_module_exactly() -> None:
             ParsedCallable(
                 name="ping",
                 qualified_name="sample_module.ping",
+                parent_qualified_name="sample_module",
                 parameters=[],
                 decorators=["app.get"],
                 line_start=35,
@@ -100,6 +105,7 @@ def test_parse_sample_module_exactly() -> None:
             ParsedCallable(
                 name="run",
                 qualified_name="sample_module.Worker.run",
+                parent_qualified_name="sample_module.Worker",
                 parameters=[
                     ParsedParameter(name="count", annotation="int", default=None, position=0)
                 ],
@@ -113,6 +119,7 @@ def test_parse_sample_module_exactly() -> None:
             ParsedCallable(
                 name="label",
                 qualified_name="sample_module.Worker.label",
+                parent_qualified_name="sample_module.Worker",
                 parameters=[
                     ParsedParameter(name="self", annotation=None, default=None, position=0)
                 ],
@@ -177,7 +184,7 @@ def test_parse_python_ast_accepts_path_or_code() -> None:
     assert parse_code("def ping() -> str:\n    return 'ok'\n").functions[0].name == "ping"
 
 
-def test_nested_function_calls_are_collected() -> None:
+def test_nested_function_is_its_own_node_owning_its_calls() -> None:
     parsed = parse_code(
         "\n".join(
             [
@@ -189,10 +196,59 @@ def test_nested_function_calls_are_collected() -> None:
         )
     )
     assert parsed.error is None
-    assert parsed.functions[0].name == "outer"
-    assert "helper" in parsed.functions[0].calls
-    assert "inner" in parsed.functions[0].calls
-    assert any(call.callee == "helper" for call in parsed.calls)
+    outer, inner = parsed.functions
+    assert outer.name == "outer"
+    assert inner.name == "inner"
+    assert inner.qualified_name == "<string>.outer.inner"
+    assert inner.parent_qualified_name == "<string>.outer"
+    # Each callable owns only the calls it makes directly.
+    assert outer.calls == ["inner"]
+    assert inner.calls == ["helper"]
+    assert any(
+        call.caller_qualified_name == inner.qualified_name and call.callee == "helper"
+        for call in parsed.calls
+    )
+
+
+def test_calls_on_opaque_receivers_are_not_recorded_by_trailing_name() -> None:
+    """``super().__init__()`` must not be recorded as a call to ``__init__``."""
+    parsed = parse_code(
+        "\n".join(
+            [
+                "class Child(Base):",
+                "    def __init__(self):",
+                "        super().__init__()",
+                "        make()().run()",
+                "        items[0].get()",
+                "        self.router.get('/')",
+                "        helper(self.value)",
+            ]
+        )
+    )
+    assert parsed.error is None
+    (init,) = parsed.methods
+    # ``super`` and ``make`` are themselves plain-name calls and stay; the calls
+    # hanging off their results are dropped instead of reduced to ``__init__``
+    # / ``run`` / ``get``.
+    assert init.calls == ["super", "make", "self.router.get", "helper"]
+
+
+def test_class_nested_in_function_is_captured_with_its_bases() -> None:
+    parsed = parse_code(
+        "\n".join(
+            [
+                "def make_router() -> None:",
+                "    class HeaderRouter(APIRouter):",
+                "        def matches(self, scope): ...",
+            ]
+        )
+    )
+    assert parsed.error is None
+    nested = parsed.classes[0]
+    assert nested.qualified_name == "<string>.make_router.HeaderRouter"
+    assert nested.parent_qualified_name == "<string>.make_router"
+    assert nested.bases == ["APIRouter"]
+    assert parsed.methods[0].qualified_name == "<string>.make_router.HeaderRouter.matches"
 
 
 def test_type_checking_imports_are_collected() -> None:
@@ -295,3 +351,61 @@ def test_module_span_without_docstring_uses_leading_imports() -> None:
     assert parsed.line_end == 2
     assert parsed.classes[0].line_start == 4
     assert parsed.classes[0].line_end == 5
+
+
+def test_definitions_inside_non_scoping_blocks_are_collected() -> None:
+    """``if``/``try``/``with`` nest statements without changing the owner."""
+    parsed = parse_code(
+        "\n".join(
+            [
+                "if FLAG:",
+                "    def guarded() -> None:",
+                "        pass",
+                "else:",
+                "    class Fallback:",
+                "        pass",
+                "try:",
+                "    def attempted() -> None:",
+                "        pass",
+                "except ValueError:",
+                "    def recovered() -> None:",
+                "        pass",
+                "finally:",
+                "    def cleaned() -> None:",
+                "        pass",
+            ]
+        )
+    )
+    assert parsed.error is None
+    assert {fn.name for fn in parsed.functions} == {
+        "guarded",
+        "attempted",
+        "recovered",
+        "cleaned",
+    }
+    assert [cls.name for cls in parsed.classes] == ["Fallback"]
+    # The block does not open a scope, so the module stays the owner.
+    assert all(fn.parent_qualified_name == "<string>" for fn in parsed.functions)
+    assert parsed.classes[0].parent_qualified_name == "<string>"
+
+
+def test_deeply_nested_definition_inside_a_guarded_closure() -> None:
+    parsed = parse_code(
+        "\n".join(
+            [
+                "def handler():",
+                "    async def app():",
+                "        if streaming:",
+                "            @asynccontextmanager",
+                "            async def producer():",
+                "                yield 1",
+                "        return app",
+            ]
+        )
+    )
+    assert parsed.error is None
+    producer = next(fn for fn in parsed.functions if fn.name == "producer")
+    assert producer.qualified_name == "<string>.handler.app.producer"
+    assert producer.parent_qualified_name == "<string>.handler.app"
+    assert producer.decorators == ["asynccontextmanager"]
+    assert producer.is_async

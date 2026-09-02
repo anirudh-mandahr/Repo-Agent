@@ -378,6 +378,132 @@ def test_index_job_forwards_full_mode() -> None:
     assert indexer.mode == "full"
 
 
+class _LongRunningIndexer:
+    """An indexer whose pass outlives the MCP request timeout.
+
+    index_repository never answers -- the gateway's dispatch times out and is
+    abandoned, exactly as it is against the real agent -- while
+    get_index_status reports the run and then its report.
+    """
+
+    def __init__(self, *, polls_running: int = 2, report: dict[str, Any] | None = None) -> None:
+        self.polls_running = polls_running
+        self.report = report or {"status": "ok", "files_indexed": 1138, "duration_s": 26.0}
+        self.polls = 0
+        self.dispatched = False
+        self.mode: str | None = None
+
+    async def index_repository(
+        self,
+        repo_url: str | None = None,
+        *,
+        mode: str = "incremental",
+        correlation_id: str,
+    ) -> dict[str, Any]:
+        _ = repo_url, correlation_id
+        self.mode = mode
+        self.dispatched = True
+        await asyncio.sleep(3600)
+        raise AssertionError("dispatch should have been abandoned")
+
+    async def get_index_status(self, *, correlation_id: str) -> dict[str, Any]:
+        _ = correlation_id
+        if not self.dispatched:
+            return {"running": False, "last_report": None}
+        self.polls += 1
+        if self.polls <= self.polls_running:
+            return {"running": True, "last_report": None}
+        return {"running": False, "last_report": self.report}
+
+
+def _index_app(indexer: Any, **overrides: Any) -> Any:
+    settings = GatewaySettings(
+        host="127.0.0.1",
+        port=8000,
+        api_key=None,
+        index_poll_interval_s=0.0,
+        **overrides,
+    )
+    deps = GatewayDependencies(
+        orchestrator=_StubOrchestrator(),
+        specialists=_StubSpecialists(),
+        gateway_settings=settings,
+        orchestrator_settings=OrchestratorSettings(),
+    )
+    deps.specialists.indexer = indexer
+    return create_app(settings, deps=deps)
+
+
+def test_index_outliving_the_request_timeout_still_reports_success() -> None:
+    indexer = _LongRunningIndexer()
+    app = _index_app(indexer)
+    record = app.state.job_registry.create(mode="full", correlation_id="corr-long")
+
+    asyncio.run(_run_index_job(app, record.job_id))
+
+    saved = app.state.job_registry.get(record.job_id)
+    assert saved is not None
+    assert saved.status == "done"
+    assert saved.error is None
+    assert saved.report == indexer.report
+    assert indexer.mode == "full"
+
+
+def test_a_finished_index_is_detected_even_if_running_was_never_observed() -> None:
+    """The pass can end between the dispatch and the first poll."""
+    indexer = _LongRunningIndexer(polls_running=0)
+    app = _index_app(indexer)
+    record = app.state.job_registry.create(mode="incremental", correlation_id="corr-fast")
+
+    asyncio.run(_run_index_job(app, record.job_id))
+
+    saved = app.state.job_registry.get(record.job_id)
+    assert saved is not None
+    assert saved.status == "done"
+    assert saved.report == indexer.report
+
+
+def test_an_index_that_never_finishes_fails_on_the_job_ceiling() -> None:
+    indexer = _LongRunningIndexer(polls_running=10_000)
+    app = _index_app(indexer, index_timeout_s=0.05)
+    record = app.state.job_registry.create(mode="full", correlation_id="corr-stuck")
+
+    asyncio.run(_run_index_job(app, record.job_id))
+
+    saved = app.state.job_registry.get(record.job_id)
+    assert saved is not None
+    assert saved.status == "failed"
+    assert "did not finish within" in (saved.error or "")
+
+
+def test_an_index_that_never_starts_fails_on_the_start_grace() -> None:
+    class _SilentIndexer(_LongRunningIndexer):
+        async def get_index_status(self, *, correlation_id: str) -> dict[str, Any]:
+            _ = correlation_id
+            return {"running": False, "last_report": None}
+
+    app = _index_app(_SilentIndexer(), index_start_grace_s=0.05)
+    record = app.state.job_registry.create(mode="full", correlation_id="corr-silent")
+
+    asyncio.run(_run_index_job(app, record.job_id))
+
+    saved = app.state.job_registry.get(record.job_id)
+    assert saved is not None
+    assert saved.status == "failed"
+    assert "did not start within" in (saved.error or "")
+
+
+def test_already_running_is_reported_from_the_dispatch() -> None:
+    refused = {"status": "already_running", "detail": "index already running"}
+    indexer = _StubIndexer(refused)
+    client = _app(indexer=indexer)
+    job_id = client.post("/api/index", json={"mode": "full"}).json()["job_id"]
+
+    body = client.get(f"/api/index/status/{job_id}").json()
+    assert body["status"] == "done"
+    assert body["report"] == refused
+
+
 def test_run_index_job_marks_failure() -> None:
     class _FailingIndexer:
         async def index_repository(

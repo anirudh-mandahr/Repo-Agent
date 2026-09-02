@@ -20,6 +20,15 @@ from core.indexing.indexer import (
 )
 from core.indexing.parser import hash_file
 
+
+def _rows_for(client: RecordingClient, fragment: str) -> list[dict[str, Any]]:
+    """Rows of the write whose Cypher contains ``fragment``; empty if never written."""
+    for query, rows in client.writes:
+        if fragment in query:
+            return rows
+    return []
+
+
 SAMPLE = Path(__file__).parent / "fixtures" / "sample_module.py"
 BROKEN = Path(__file__).parent / "fixtures" / "broken.py"
 
@@ -34,11 +43,17 @@ class RecordingClient:
         node_count: int = 0,
         rel_count: int = 0,
         label_counts: dict[str, int] | None = None,
+        callables: list[dict[str, Any]] | None = None,
+        modules: list[dict[str, Any]] | None = None,
+        imports: list[dict[str, Any]] | None = None,
     ) -> None:
         self.hashes = hashes or {}
         self.node_count = node_count
         self.rel_count = rel_count
         self.label_counts = label_counts or {}
+        self.callables = callables or []
+        self.modules = modules or []
+        self.imports = imports or []
         self.reads: list[str] = []
         self.writes: list[tuple[str, list[dict[str, Any]]]] = []
 
@@ -66,6 +81,12 @@ class RecordingClient:
                     "last_indexed_at": "2026-08-18T00:00:00+00:00",
                 }
             ]
+        if "i.module AS import_module" in query:
+            return list(self.imports)
+        if "n:Function OR n:Method" in query:
+            return list(self.callables)
+        if "MATCH (n:Module) RETURN" in query:
+            return list(self.modules)
         return []
 
     def run_write_batch(self, query: str, rows: Sequence[Mapping[str, Any]]) -> None:
@@ -106,6 +127,63 @@ def test_new_file_is_upserted_without_delete(tmp_path: Path) -> None:
     assert "sample_module.helper" in names
     assert "sample_module.Worker" in names
     assert any(row["embedding_text"] for row in embedding_rows)
+
+
+class _FlakyEmbedder:
+    """Embeds ``fail_after`` chunks, then raises the way a remote backend would."""
+
+    def __init__(self, fail_after: int) -> None:
+        self.fail_after = fail_after
+        self.calls = 0
+
+    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        self.calls += 1
+        if self.calls > self.fail_after:
+            raise ConnectionError("embedding backend unreachable")
+        return [[1.0] + [0.0] * 255 for _ in texts]
+
+
+def test_the_embedding_backend_is_recorded_alongside_the_vectors(tmp_path: Path) -> None:
+    _write_sample(tmp_path)
+    client = RecordingClient()
+
+    index_repository(client, tmp_path, skip_tests=True, skip_docs=True)
+
+    meta_rows = [
+        row
+        for query, rows in client.writes
+        if "MERGE (m:Meta {key: row.key})" in query
+        for row in rows
+    ]
+    fingerprints = [row for row in meta_rows if row["key"] == "embedding_fingerprint"]
+    assert fingerprints
+    assert fingerprints[0]["value"] == "hash:256"
+
+
+def test_embedding_failure_keeps_the_structural_index(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _write_sample(tmp_path)
+    monkeypatch.setattr("core.indexing.indexer.EMBEDDING_CHUNK_SIZE", 1)
+    provider = _FlakyEmbedder(fail_after=1)
+    client = RecordingClient()
+
+    report = index_repository(
+        client,
+        tmp_path,
+        skip_tests=True,
+        skip_docs=True,
+        embedding_provider=provider,
+    )
+
+    assert report.status == "ok"
+    assert report.files_indexed == 1
+    assert report.nodes_written > 0
+    assert any("MERGE (f:File {path: row.path})" in query for query in _queries(client))
+    # The one chunk embedded before the failure is still persisted.
+    written = [rows for query, rows in client.writes if "n.embedding = row.embedding" in query]
+    assert len(written) == 1
+    assert len(written[0]) == 1
 
 
 def test_unchanged_hash_is_skipped(tmp_path: Path) -> None:
@@ -324,3 +402,267 @@ def test_save_and_read_report_roundtrip(tmp_path: Path) -> None:
     loaded = read_saved_report(path)
     assert loaded == report
     assert read_saved_report(tmp_path / "missing.json") is None
+
+
+def test_class_nested_in_function_is_indexed_and_parented(tmp_path: Path) -> None:
+    """A subclass declared inside a test function is still a node with its base edge."""
+    (tmp_path / "routers.py").write_text(
+        "class APIRouter:\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "def test_subclass() -> None:\n"
+        "    class HeaderRouter(APIRouter):\n"
+        "        def matches(self):\n"
+        "            return True\n"
+    )
+    client = RecordingClient()
+    index_repository(client, tmp_path, skip_tests=False, skip_docs=False)
+
+    classes = _rows_for(client, "MERGE (n:Class")
+    assert {row["qualified_name"] for row in classes} == {
+        "routers.APIRouter",
+        "routers.test_subclass.HeaderRouter",
+    }
+    inherits = _rows_for(client, "INHERITS_FROM")
+    assert inherits == [
+        {
+            "child_qualified_name": "routers.test_subclass.HeaderRouter",
+            "parent_qualified_name": "routers.APIRouter",
+        }
+    ]
+    contains = _rows_for(client, "MATCH (child:Class")
+    assert {
+        "parent_qualified_name": "routers.test_subclass",
+        "child_qualified_name": "routers.test_subclass.HeaderRouter",
+    } in contains
+    methods = _rows_for(client, "MERGE (n:Method")
+    assert {row["qualified_name"] for row in methods} == {
+        "routers.test_subclass.HeaderRouter.matches"
+    }
+
+
+def test_decorators_on_nested_functions_are_recorded(tmp_path: Path) -> None:
+    (tmp_path / "wrap.py").write_text(
+        "import functools\n"
+        "\n"
+        "\n"
+        "def outer(fn):\n"
+        "    @functools.wraps(fn)\n"
+        "    def wrapper(*args):\n"
+        "        return fn(*args)\n"
+        "    return wrapper\n"
+    )
+    client = RecordingClient()
+    index_repository(client, tmp_path, skip_tests=False, skip_docs=False)
+
+    decorators = _rows_for(client, "MERGE (d:Decorator")
+    assert {
+        "owner_qualified_name": "wrap.outer.wrapper",
+        "name": "functools.wraps",
+    } in decorators
+
+
+def test_third_party_import_is_not_rewired_to_a_same_named_local_module(
+    tmp_path: Path,
+) -> None:
+    """``from starlette.responses import X`` must not link to a local ``responses``."""
+    pkg = tmp_path / "app"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "responses.py").write_text("class JSONResponse:\n    pass\n")
+    (pkg / "main.py").write_text(
+        "from starlette.responses import JSONResponse\n"
+        "\n"
+        "\n"
+        "def send():\n"
+        "    return JSONResponse()\n"
+    )
+    client = RecordingClient()
+    index_repository(client, tmp_path, skip_tests=False, skip_docs=False)
+
+    depends = _rows_for(client, "MATCH (src:Module")
+    assert not any(row["to_qualified_name"] == "app.responses" for row in depends)
+    calls = _rows_for(client, "MERGE (caller)-[:CALLS]")
+    assert calls == []
+
+
+def test_relative_import_resolves_against_its_package(tmp_path: Path) -> None:
+    """``from .utils import x`` in ``tests/`` must not need a globally unique name."""
+    for package in ("alpha", "beta"):
+        pkg = tmp_path / package
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "utils.py").write_text("def helper():\n    return 1\n")
+        (pkg / "runner.py").write_text(
+            "from .utils import helper\n\n\ndef run():\n    return helper()\n"
+        )
+    client = RecordingClient()
+    index_repository(client, tmp_path, skip_tests=False, skip_docs=False)
+
+    depends = _rows_for(client, "MATCH (src:Module")
+    pairs = {(row["from_qualified_name"], row["to_qualified_name"]) for row in depends}
+    assert ("alpha.runner", "alpha.utils") in pairs
+    assert ("beta.runner", "beta.utils") in pairs
+    assert ("alpha.runner", "beta.utils") not in pairs
+
+    calls = _rows_for(client, "MERGE (caller)-[:CALLS]")
+    call_pairs = {
+        (row["caller_qualified_name"], row["callee_qualified_name"]) for row in calls
+    }
+    assert ("alpha.runner.run", "alpha.utils.helper") in call_pairs
+    assert ("beta.runner.run", "beta.utils.helper") in call_pairs
+
+
+def _call_pairs(client: RecordingClient) -> set[tuple[str, str]]:
+    return {
+        (row["caller_qualified_name"], row["callee_qualified_name"])
+        for row in _rows_for(client, "MERGE (caller)-[:CALLS]")
+    }
+
+
+def test_call_on_unknown_receiver_does_not_match_a_same_named_method(
+    tmp_path: Path,
+) -> None:
+    """``self.router.get()`` / ``req.scope.get()`` must not become ``CALLS -> App.get``.
+
+    This reproduces the FastAPI graph: ``FastAPI.get`` delegates to
+    ``self.router.get`` and the old bare-name fallback linked it to itself.
+    """
+    (tmp_path / "app.py").write_text(
+        "class App:\n"
+        "    def __init__(self):\n"
+        "        self.router = None\n"
+        "        self.setup()\n"
+        "\n"
+        "    def setup(self):\n"
+        "        def redoc(req):\n"
+        "            root = req.scope.get('root_path')\n"
+        "            return self.openapi()\n"
+        "        return redoc\n"
+        "\n"
+        "    def openapi(self):\n"
+        "        return {}\n"
+        "\n"
+        "    def get(self, path):\n"
+        "        return self.router.get(path)\n"
+        "\n"
+        "    def include(self, other):\n"
+        "        return super().include(other)\n"
+    )
+    client = RecordingClient()
+    report = index_repository(client, tmp_path, skip_tests=False, skip_docs=False)
+
+    pairs = _call_pairs(client)
+    assert ("app.App.__init__", "app.App.setup") in pairs
+    # ``self.openapi()`` inside a closure resolves against the enclosing class.
+    assert ("app.App.setup.redoc", "app.App.openapi") in pairs
+    # No self-loops, and nothing points at ``App.get`` from an unknown receiver.
+    assert not any(caller == callee for caller, callee in pairs)
+    assert not any(callee == "app.App.get" for _caller, callee in pairs)
+    assert not any(callee == "app.App.include" for _caller, callee in pairs)
+    # self.router.get, req.scope.get and the builtin super() are reported as
+    # unresolved rather than guessed.
+    assert report.unresolved_calls == 3
+
+
+def test_dotted_call_with_unbound_head_stays_unresolved(tmp_path: Path) -> None:
+    """``client.get('/')`` in a test must not link to an imported ``Router.get``."""
+    pkg = tmp_path / "web"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "routing.py").write_text(
+        "class Router:\n    def get(self, path):\n        return path\n"
+    )
+    (tmp_path / "test_routes.py").write_text(
+        "from web.routing import Router\n"
+        "\n"
+        "\n"
+        "def test_root(client):\n"
+        "    return client.get('/')\n"
+    )
+    client = RecordingClient()
+    index_repository(client, tmp_path, skip_tests=False, skip_docs=False)
+
+    assert _call_pairs(client) == set()
+
+
+def test_reexported_name_resolves_to_its_defining_module(tmp_path: Path) -> None:
+    """``from pkg import Depends`` follows ``pkg/__init__.py`` to ``pkg.params.Depends``."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("from .params import Depends as Depends\n")
+    (pkg / "params.py").write_text("def Depends(dep):\n    return dep\n")
+    (tmp_path / "main.py").write_text(
+        "import pkg\n"
+        "from pkg import Depends\n"
+        "\n"
+        "\n"
+        "def by_name():\n"
+        "    return Depends(None)\n"
+        "\n"
+        "\n"
+        "def by_module():\n"
+        "    return pkg.Depends(None)\n"
+    )
+    client = RecordingClient()
+    report = index_repository(client, tmp_path, skip_tests=False, skip_docs=False)
+
+    pairs = _call_pairs(client)
+    assert ("main.by_name", "pkg.params.Depends") in pairs
+    assert ("main.by_module", "pkg.params.Depends") in pairs
+    assert report.unresolved_calls == 0
+
+
+def test_reexported_base_class_resolves_inheritance(tmp_path: Path) -> None:
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("from .exceptions import HTTPError\n")
+    (pkg / "exceptions.py").write_text("class HTTPError(Exception):\n    pass\n")
+    (tmp_path / "main.py").write_text(
+        "from pkg import HTTPError\n\n\nclass NotFound(HTTPError):\n    pass\n"
+    )
+    client = RecordingClient()
+    index_repository(client, tmp_path, skip_tests=False, skip_docs=False)
+
+    inherits = _rows_for(client, "INHERITS_FROM")
+    assert {
+        "child_qualified_name": "main.NotFound",
+        "parent_qualified_name": "pkg.exceptions.HTTPError",
+    } in inherits
+
+
+def test_incremental_pass_follows_reexports_stored_in_the_graph(tmp_path: Path) -> None:
+    """Only ``main.py`` is re-parsed; ``pkg``'s re-export table comes from :Import nodes."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("from .params import Depends as Depends\n")
+    (pkg / "params.py").write_text("def Depends(dep):\n    return dep\n")
+    (tmp_path / "main.py").write_text(
+        "from pkg import Depends\n\n\ndef by_name():\n    return Depends(None)\n"
+    )
+    client = RecordingClient(
+        hashes={
+            "pkg/__init__.py": hash_file(pkg / "__init__.py"),
+            "pkg/params.py": hash_file(pkg / "params.py"),
+        },
+        callables=[{"qualified_name": "pkg.params.Depends", "name": "Depends"}],
+        modules=[
+            {"qualified_name": "pkg", "name": "pkg"},
+            {"qualified_name": "pkg.params", "name": "params"},
+        ],
+        imports=[
+            {
+                "module": "pkg",
+                "file_path": "pkg/__init__.py",
+                "import_module": ".params",
+                "names": ["Depends"],
+                "alias": "Depends",
+                "position": 0,
+            }
+        ],
+    )
+    report = index_repository(client, tmp_path, skip_tests=False, skip_docs=False)
+
+    assert report.files_indexed == 1
+    assert ("main.by_name", "pkg.params.Depends") in _call_pairs(client)

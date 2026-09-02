@@ -28,6 +28,12 @@ DEFAULT_MEMORY_DB_PATH = "/data/memory.db"
 DEFAULT_MEMORY_CACHE_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_MEMORY_TOKEN_BUDGET = 3000
 DEFAULT_MEMORY_RECENT_TURNS = 6
+DEFAULT_EMBEDDING_MODEL = "openai/text-embedding-3-small"
+DEFAULT_EMBEDDING_DIMENSIONS = 256
+DEFAULT_EMBEDDING_BATCH_SIZE = 96
+# Neo4j normalizes cosine to (1 + cos) / 2, so 0.5 is orthogonal. Fitted to the
+# hash backend, whose unrelated text scores exactly 0.5.
+DEFAULT_EMBEDDING_MIN_SCORE = 0.6
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if TYPE_CHECKING:
@@ -185,6 +191,27 @@ class GatewaySettings(ServiceSettings):
     health_timeout_s: float = 2.0
     answer_chunk_chars: int = 160
     chat_timeout_s: float = 90.0
+    index_poll_interval_s: float = Field(
+        default=2.0,
+        description="Gap between get_index_status polls while an index job runs.",
+        validation_alias=AliasChoices("GATEWAY_INDEX_POLL_INTERVAL_S", "index_poll_interval_s"),
+    )
+    index_start_grace_s: float = Field(
+        default=30.0,
+        description=(
+            "How long a dispatched index may take to report running before the "
+            "job is treated as never started."
+        ),
+        validation_alias=AliasChoices("GATEWAY_INDEX_START_GRACE_S", "index_start_grace_s"),
+    )
+    index_timeout_s: float = Field(
+        default=3600.0,
+        description=(
+            "Ceiling on one index job. Separate from request_timeout_s, which "
+            "bounds a single MCP round trip and is far shorter than an index."
+        ),
+        validation_alias=AliasChoices("GATEWAY_INDEX_TIMEOUT_S", "index_timeout_s"),
+    )
     api_key: SecretStr | None = None
     rate_limit_requests: int = 60
     rate_limit_window_s: float = 60.0
@@ -579,6 +606,112 @@ class OrchestratorSettings(ServiceSettings):
             threshold if threshold is not None else self.breaker_failure_threshold,
             cooldown if cooldown is not None else self.breaker_cooldown_s,
         )
+
+
+class EmbeddingSettings(RepoSettings):
+    """Which vector backend produces embeddings, and how it is called.
+
+    Credentials default to the OpenRouter values the LLM stack already uses, so
+    enabling a real model needs no new secret. ``backend`` stays ``hash`` unless
+    set explicitly: an API key being present must not silently turn indexing
+    into a paid, network-dependent operation.
+    """
+
+    backend: Literal["hash", "openrouter"] = Field(
+        default="hash",
+        description=(
+            "'hash' is the offline lexical fallback; 'openrouter' calls a real "
+            "embedding model. Explicit opt-in -- an API key alone does not switch it."
+        ),
+        validation_alias=AliasChoices("EMBEDDING_BACKEND", "backend"),
+    )
+    model: str = Field(
+        default=DEFAULT_EMBEDDING_MODEL,
+        validation_alias=AliasChoices("EMBEDDING_MODEL", "model"),
+    )
+    dimensions: int = Field(
+        default=DEFAULT_EMBEDDING_DIMENSIONS,
+        description=(
+            "Must equal the dimension the Neo4j vector indexes were created "
+            "with. Changing it requires dropping and recreating those indexes."
+        ),
+        validation_alias=AliasChoices("EMBEDDING_DIMENSIONS", "dimensions"),
+    )
+    batch_size: int = Field(
+        default=DEFAULT_EMBEDDING_BATCH_SIZE,
+        validation_alias=AliasChoices("EMBEDDING_BATCH_SIZE", "batch_size"),
+    )
+    max_attempts: int = Field(
+        default=4,
+        description="Attempts per batch, including the first. Backoff is exponential.",
+        validation_alias=AliasChoices("EMBEDDING_MAX_ATTEMPTS", "max_attempts"),
+    )
+    timeout_s: float = Field(
+        default=30.0,
+        validation_alias=AliasChoices("EMBEDDING_TIMEOUT_S", "timeout_s"),
+    )
+    api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("EMBEDDING_API_KEY", "OPENROUTER_API_KEY", "api_key"),
+    )
+    base_url: str = Field(
+        default=DEFAULT_OPENROUTER_BASE_URL,
+        validation_alias=AliasChoices("EMBEDDING_BASE_URL", "OPENROUTER_BASE_URL", "base_url"),
+    )
+    usd_per_million: float = Field(
+        default=0.02,
+        description="Reporting only; used to log the cost of an index pass.",
+        validation_alias=AliasChoices("EMBEDDING_USD_PER_MILLION", "usd_per_million"),
+    )
+    min_score: float | None = Field(
+        default=None,
+        description=(
+            "Vector-index score floor. Backend-specific when unset, because "
+            "the two backends do not produce comparable score distributions."
+        ),
+        validation_alias=AliasChoices("EMBEDDING_MIN_SCORE", "min_score"),
+    )
+
+    @field_validator("min_score", mode="before")
+    @classmethod
+    def _blank_min_score(cls, value: object) -> object:
+        # Compose passes an unset optional through as "", which is not a float.
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("dimensions", "batch_size", "max_attempts")
+    @classmethod
+    def _positive(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("must be at least 1")
+        return value
+
+    @classmethod
+    def from_env(cls) -> EmbeddingSettings:
+        """From env.
+
+        Returns:
+            EmbeddingSettings.
+        """
+        return cls()
+
+    def resolve_min_score(self) -> float:
+        """Return the vector-index score floor for the configured backend.
+
+        Neo4j reports cosine as ``(1 + cos) / 2``, so 0.5 is orthogonal, not 0.
+        The hash backend gives unrelated text a raw cosine of exactly 0 -- no
+        shared tokens -- which lands on 0.5, so 0.6 cleanly means "some
+        overlap". A real model has no such floor: unrelated code text still
+        scores around 0.24 raw, or 0.62 normalized, which would sail past 0.6
+        and make the tier return matches for everything.
+
+        Returns:
+            Explicit ``EMBEDDING_MIN_SCORE`` when set, else the backend default.
+        """
+        if self.min_score is not None:
+            return self.min_score
+        return 0.7 if self.backend == "openrouter" else DEFAULT_EMBEDDING_MIN_SCORE
 
 
 class GraphQuerySettings(ServiceSettings):

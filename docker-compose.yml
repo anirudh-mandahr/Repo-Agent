@@ -6,6 +6,18 @@ x-agent-resources: &agent-resources
     cpus: "0.10"
     memory: 128M
 
+# Indexer and graph_query must embed identically, or index-time vectors are not
+# comparable with query-time vectors. Shared here so they cannot drift.
+x-embedding-env: &embedding-env
+  EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-hash}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-openai/text-embedding-3-small}
+  EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-256}
+  EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-96}
+  EMBEDDING_MAX_ATTEMPTS: ${EMBEDDING_MAX_ATTEMPTS:-4}
+  EMBEDDING_TIMEOUT_S: ${EMBEDDING_TIMEOUT_S:-30}
+  EMBEDDING_MIN_SCORE: ${EMBEDDING_MIN_SCORE:-}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+
 services:
   neo4j:
     image: neo4j:5-community@sha256:d9dd3dc7d1c78fa959191ff02dbdcbefadceaf83eee23428fb92a58cac8ad3fe
@@ -73,6 +85,7 @@ services:
         PACKAGE: indexer
     restart: unless-stopped
     environment:
+      <<: *embedding-env
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       MCP_HOST: ${MCP_HOST:-0.0.0.0}
       MCP_PORT: "8002"
@@ -117,6 +130,7 @@ services:
         PACKAGE: graph_query
     restart: unless-stopped
     environment:
+      <<: *embedding-env
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       MCP_HOST: ${MCP_HOST:-0.0.0.0}
       MCP_PORT: "8003"
@@ -222,6 +236,9 @@ services:
       GATEWAY_PORT: ${GATEWAY_PORT:-8000}
       GATEWAY_REQUEST_TIMEOUT_S: ${GATEWAY_REQUEST_TIMEOUT_S:-10}
       GATEWAY_CHAT_TIMEOUT_S: ${GATEWAY_CHAT_TIMEOUT_S:-90}
+      GATEWAY_INDEX_POLL_INTERVAL_S: ${GATEWAY_INDEX_POLL_INTERVAL_S:-2}
+      GATEWAY_INDEX_START_GRACE_S: ${GATEWAY_INDEX_START_GRACE_S:-30}
+      GATEWAY_INDEX_TIMEOUT_S: ${GATEWAY_INDEX_TIMEOUT_S:-3600}
       GATEWAY_API_KEY: ${GATEWAY_API_KEY:-dev-gateway-key}
       MCP_SHARED_SECRET: ${GATEWAY_API_KEY:-dev-gateway-key}
       ORCHESTRATOR_MCP_URL: ${ORCHESTRATOR_MCP_URL:-http://orchestrator:8001/mcp}

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence, Set
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -59,19 +59,26 @@ from core.indexing.parser import (
     ParsedClass,
     ParsedDocstring,
     ParsedFile,
+    ParsedImport,
     ParseError,
     hash_file,
     parse_file,
 )
 from core.logging import bind_correlation_id, get_correlation_id, get_logger
 from core.querying.embeddings import (
+    EMBEDDING_FINGERPRINT_KEY,
     EmbeddingProvider,
     build_embedding_text,
     default_embedding_provider,
+    provider_fingerprint,
 )
 from core.settings import IndexingSettings
 
 log = get_logger(__name__)
+
+# Vectors are embedded and written this many at a time so that a mid-run
+# failure of a remote backend leaves the earlier chunks persisted.
+EMBEDDING_CHUNK_SIZE = 500
 
 SKIP_DIR_NAMES = frozenset(
     {
@@ -93,6 +100,13 @@ LOAD_CALLABLES_QUERY = (
 )
 LOAD_CLASSES_QUERY = "MATCH (n:Class) RETURN n.qualified_name AS qualified_name, n.name AS name"
 LOAD_MODULES_QUERY = "MATCH (n:Module) RETURN n.qualified_name AS qualified_name, n.name AS name"
+LOAD_IMPORTS_QUERY = (
+    "MATCH (m:Module)-[:IMPORTS]->(i:Import) "
+    "RETURN m.qualified_name AS module, m.file_path AS file_path, "
+    "i.module AS import_module, i.names AS names, i.alias AS alias, "
+    "i.position AS position "
+    "ORDER BY module, position"
+)
 LOAD_INDEX_META_QUERY = (
     "MATCH (m:Meta {key: 'index_version'}) "
     "RETURN m.value AS index_version, m.updated_at AS last_indexed_at"
@@ -693,7 +707,7 @@ def _upsert_parsed_files(
             )
             contains_classes.append(
                 ContainsEntityRow(
-                    parent_qualified_name=parsed.module,
+                    parent_qualified_name=cls.parent_qualified_name or parsed.module,
                     child_qualified_name=cls.qualified_name,
                 )
             )
@@ -707,7 +721,7 @@ def _upsert_parsed_files(
             function_records.append(_function_record(fn, parsed.path))
             contains_functions.append(
                 ContainsEntityRow(
-                    parent_qualified_name=parsed.module,
+                    parent_qualified_name=fn.parent_qualified_name or parsed.module,
                     child_qualified_name=fn.qualified_name,
                 )
             )
@@ -717,7 +731,9 @@ def _upsert_parsed_files(
             _add_name(qn_index, name_index, fn.qualified_name, fn.name)
         for method in parsed.methods:
             method_records.append(_method_record(method, parsed.path))
-            parent_qn = method.qualified_name.rsplit(".", 1)[0]
+            parent_qn = (
+                method.parent_qualified_name or method.qualified_name.rsplit(".", 1)[0]
+            )
             contains_methods.append(
                 ContainsEntityRow(
                     parent_qualified_name=parent_qn,
@@ -772,6 +788,52 @@ def _upsert_parsed_files(
         if isinstance(qn, str) and isinstance(name, str):
             _add_name(module_qn_index, module_name_index, qn, name)
 
+    module_qns: set[str] = set(module_qn_index)
+    file_bindings: dict[str, dict[str, str]] = {}
+    file_visible: dict[str, set[str]] = {}
+    # Every indexed module's import bindings, so a name imported from a package
+    # (``from fastapi import Depends``) can be followed through the package's own
+    # ``from .param_functions import Depends`` to the defining module. Modules
+    # outside this batch come from the graph; batch files override them below.
+    module_bindings = load_module_bindings(client)
+
+    for parsed in parsed_files:
+        is_package = parsed.path.endswith("__init__.py")
+        bindings = import_bindings(parsed, is_package=is_package)
+        file_bindings[parsed.path] = bindings
+        if parsed.module:
+            module_bindings[parsed.module] = bindings
+        visible = {parsed.module} if parsed.module else set()
+        for position, imported in enumerate(parsed.imports):
+            if not imported.module:
+                continue
+            target = resolve_relative_module(
+                imported.module, current_module=parsed.module, is_package=is_package
+            )
+            if not target:
+                continue
+            # An import only becomes an edge when it names a module we actually
+            # indexed. Third-party targets are left unresolved on purpose.
+            resolved = target if target in module_qns else None
+            if resolved is None:
+                continue
+            visible.add(resolved)
+            if resolved != parsed.module:
+                import_depends_rows.append(
+                    ImportDependsOnRow(
+                        file_path=parsed.path,
+                        position=position,
+                        module_qualified_name=resolved,
+                    )
+                )
+                depends_on_rows.append(
+                    DependsOnRow(
+                        from_qualified_name=parsed.module,
+                        to_qualified_name=resolved,
+                    )
+                )
+        file_visible[parsed.path] = visible
+
     for parsed in parsed_files:
         for cls in parsed.classes:
             for base in cls.bases:
@@ -781,6 +843,11 @@ def _upsert_parsed_files(
                     caller_qn=cls.qualified_name,
                     qn_index=class_qn_index,
                     name_index=class_name_index,
+                    bindings=file_bindings.get(parsed.path),
+                    visible_modules=file_visible.get(parsed.path),
+                    module_qns=module_qns,
+                    class_qns=class_qn_index.keys(),
+                    reexports=module_bindings,
                 )
                 if parent and parent != cls.qualified_name:
                     inherits_rows.append(
@@ -789,35 +856,6 @@ def _upsert_parsed_files(
                             parent_qualified_name=parent,
                         )
                     )
-        for position, imported in enumerate(parsed.imports):
-            if not imported.module:
-                continue
-            target = imported.module.lstrip(".")
-            if not target:
-                continue
-            resolved = _resolve_name(
-                target,
-                module=parsed.module,
-                caller_qn=parsed.module,
-                qn_index=module_qn_index,
-                name_index=module_name_index,
-            )
-            if resolved is None:
-                continue
-            import_depends_rows.append(
-                ImportDependsOnRow(
-                    file_path=parsed.path,
-                    position=position,
-                    module_qualified_name=resolved,
-                )
-            )
-            if resolved != parsed.module:
-                depends_on_rows.append(
-                    DependsOnRow(
-                        from_qualified_name=parsed.module,
-                        to_qualified_name=resolved,
-                    )
-                )
     rels += _write(client, *upsert_inherits(inherits_rows))
     rels += _write(client, *upsert_import_depends_on(import_depends_rows))
     rels += _write(client, *upsert_depends_on(depends_on_rows))
@@ -832,6 +870,11 @@ def _upsert_parsed_files(
                 caller_qn=call.caller_qualified_name,
                 qn_index=qn_index,
                 name_index=name_index,
+                bindings=file_bindings.get(parsed.path),
+                visible_modules=file_visible.get(parsed.path),
+                module_qns=module_qns,
+                class_qns=class_qn_index.keys(),
+                reexports=module_bindings,
             )
             if callee is None:
                 unresolved += 1
@@ -843,10 +886,7 @@ def _upsert_parsed_files(
                 )
             )
     rels += _write(client, *upsert_calls(call_rows))
-    embedding_rows = _embedding_records(parsed_files, embedding_provider)
-    if embedding_rows:
-        _write(client, *upsert_embeddings(embedding_rows))
-        log.info("index.embeddings_written", count=len(embedding_rows))
+    _write_embeddings(client, parsed_files, embedding_provider)
 
     nodes = (
         len(file_records)
@@ -862,11 +902,74 @@ def _upsert_parsed_files(
     return nodes, rels, unresolved
 
 
-def _embedding_records(
+def _write_embeddings(
+    client: IndexGraphClient,
     parsed_files: Sequence[ParsedFile],
     embedding_provider: EmbeddingProvider | None,
-) -> list[EmbeddingRecord]:
+) -> int:
+    """Embed the parsed entities and persist the vectors chunk by chunk.
+
+    A configured backend may be a remote model, so embedding is the one step
+    here that can fail for reasons unrelated to the repository. The structural
+    graph is already written and valid at this point; losing it to a 429 would
+    be a worse outcome than a graph whose vectors are stale. Chunks that made
+    it are therefore kept, the failure is logged, and the pass continues.
+
+    Args:
+        client: IndexGraphClient.
+        parsed_files: Files whose classes, functions, and methods get vectors.
+        embedding_provider: Backend override. Env default when omitted.
+
+    Returns:
+        Number of vectors written.
+    """
     provider = embedding_provider or default_embedding_provider()
+    documents = _embedding_documents(parsed_files)
+    if not documents:
+        return 0
+    written = 0
+    for start in range(0, len(documents), EMBEDDING_CHUNK_SIZE):
+        chunk = documents[start : start + EMBEDDING_CHUNK_SIZE]
+        try:
+            records = _embedding_records(chunk, provider)
+        except Exception as exc:
+            log.error(
+                "index.embeddings_failed",
+                written=written,
+                skipped=len(documents) - written,
+                error=str(exc),
+            )
+            break
+        if not records:
+            continue
+        _write(client, *upsert_embeddings(records))
+        written += len(records)
+    if written:
+        _record_embedding_fingerprint(client, provider)
+        log.info("index.embeddings_written", count=written)
+    return written
+
+
+def _record_embedding_fingerprint(client: IndexGraphClient, provider: EmbeddingProvider) -> None:
+    """Store which vector space the stored embeddings belong to."""
+    fingerprint = provider_fingerprint(provider)
+    if fingerprint is None:
+        return
+    _write(
+        client,
+        *upsert_meta(
+            [
+                MetaRecord(
+                    key=EMBEDDING_FINGERPRINT_KEY,
+                    value=fingerprint,
+                    updated_at=datetime.now(tz=UTC).isoformat(),
+                )
+            ]
+        ),
+    )
+
+
+def _embedding_documents(parsed_files: Sequence[ParsedFile]) -> list[tuple[str, str]]:
     documents: list[tuple[str, str]] = []
     for parsed in parsed_files:
         for cls in parsed.classes:
@@ -875,6 +978,13 @@ def _embedding_records(
             documents.append((fn.qualified_name, _callable_embedding_text(fn)))
         for method in parsed.methods:
             documents.append((method.qualified_name, _callable_embedding_text(method)))
+    return documents
+
+
+def _embedding_records(
+    documents: Sequence[tuple[str, str]],
+    provider: EmbeddingProvider,
+) -> list[EmbeddingRecord]:
     if not documents:
         return []
     vectors = list(provider.embed([text for _qn, text in documents]))
@@ -993,6 +1103,204 @@ def _add_name(
         bucket.append(qualified_name)
 
 
+def resolve_relative_module(module_ref: str, *, current_module: str, is_package: bool) -> str:
+    """Resolve a PEP 328 relative import to an absolute dotted module name.
+
+    ``from .b import x`` inside package ``a`` resolves against ``a`` itself;
+    inside module ``a.c`` it resolves against ``a``. Each extra leading dot
+    strips one further package level.
+
+    Args:
+        module_ref: The ``module`` text of the import, e.g. ``".."`` or ``".b"``.
+        current_module: Dotted name of the module containing the import.
+        is_package: True when the containing file is an ``__init__.py``.
+
+    Returns:
+        The absolute dotted name, or ``""`` when it walks above the repo root.
+    """
+    if not module_ref.startswith("."):
+        return module_ref
+    stripped = module_ref.lstrip(".")
+    level = len(module_ref) - len(stripped)
+    base = current_module if is_package else current_module.rpartition(".")[0]
+    for _ in range(level - 1):
+        base = base.rpartition(".")[0]
+    if not base:
+        return stripped
+    return f"{base}.{stripped}" if stripped else base
+
+
+def import_bindings(
+    parsed: ParsedFile,
+    *,
+    is_package: bool,
+) -> dict[str, str]:
+    """Map each name the file binds via import to the dotted target it names.
+
+    ``import a.b as c`` binds ``c`` -> ``a.b``; ``from a.b import c`` binds
+    ``c`` -> ``a.b.c``. Relative imports are made absolute first. This is what
+    lets call and inheritance resolution prefer targets the file can actually
+    see, instead of guessing from a bare name.
+
+    Args:
+        parsed: The parsed file whose imports should be read.
+        is_package: True when the file is an ``__init__.py``.
+
+    Returns:
+        Mapping of local binding name to absolute dotted target.
+    """
+    return bindings_from_imports(parsed.imports, module=parsed.module, is_package=is_package)
+
+
+def bindings_from_imports(
+    imports: Sequence[ParsedImport],
+    *,
+    module: str,
+    is_package: bool,
+) -> dict[str, str]:
+    """Map imported names to dotted targets for one module's import statements.
+
+    Same rules as :func:`import_bindings`, but fed by any import list -- parsed
+    from source or reconstructed from ``:Import`` nodes already in the graph.
+
+    Args:
+        imports: The module's import statements in source order.
+        module: Dotted name of the module containing the imports.
+        is_package: True when the module is an ``__init__.py``.
+
+    Returns:
+        Mapping of local binding name to absolute dotted target.
+    """
+    bindings: dict[str, str] = {}
+    for imported in imports:
+        raw = imported.module or ""
+        target = resolve_relative_module(raw, current_module=module, is_package=is_package)
+        if raw.startswith("."):
+            # ``from .pkg import name`` binds each name under the resolved package.
+            for name in imported.names:
+                bindings.setdefault(imported.alias or name, f"{target}.{name}" if target else name)
+            continue
+        if imported.names == [raw]:
+            # Plain ``import a.b`` (optionally ``as c``): binds the dotted path itself.
+            bindings.setdefault(imported.alias or raw, raw)
+            head = raw.partition(".")[0]
+            bindings.setdefault(head, head)
+            continue
+        for name in imported.names:
+            bindings.setdefault(
+                imported.alias or name, f"{target}.{name}" if target else name
+            )
+    return bindings
+
+
+def load_module_bindings(client: IndexGraphClient) -> dict[str, dict[str, str]]:
+    """Rebuild every indexed module's import bindings from its ``:Import`` nodes.
+
+    This is the re-export table: for package ``fastapi`` it maps ``Depends`` to
+    ``fastapi.param_functions.Depends``, so a file that only sees the package can
+    still be linked to the defining module.
+
+    Args:
+        client: IndexGraphClient.
+
+    Returns:
+        Module qualified name to its binding map.
+    """
+    grouped: dict[str, tuple[bool, list[ParsedImport]]] = {}
+    for row in client.run_read(LOAD_IMPORTS_QUERY):
+        module = row.get("module")
+        if not isinstance(module, str) or not module:
+            continue
+        file_path = row.get("file_path")
+        is_package = isinstance(file_path, str) and file_path.endswith("__init__.py")
+        raw_names = row.get("names") or []
+        names = [str(name) for name in raw_names] if isinstance(raw_names, list) else []
+        imported = ParsedImport(
+            module=_as_opt_str(row.get("import_module")),
+            names=names,
+            alias=_as_opt_str(row.get("alias")),
+        )
+        grouped.setdefault(module, (is_package, []))[1].append(imported)
+    return {
+        module: bindings_from_imports(imports, module=module, is_package=is_package)
+        for module, (is_package, imports) in grouped.items()
+    }
+
+
+def _owning_module(qualified_name: str, module_qns: Set[str]) -> str | None:
+    prefix = qualified_name
+    while prefix:
+        if prefix in module_qns:
+            return prefix
+        prefix = prefix.rpartition(".")[0]
+    return None
+
+
+_INSTANCE_NAMES = frozenset({"self", "cls"})
+# ``a`` re-exports from ``b`` which re-exports from ``c``: enough hops for any
+# real package layout, and a hard stop for accidental import cycles.
+_REEXPORT_MAX_HOPS = 4
+
+
+def _enclosing_class(qualified_name: str, class_qns: Set[str]) -> str | None:
+    """Return the nearest class that ``qualified_name`` is defined inside of."""
+    prefix = qualified_name.rpartition(".")[0]
+    while prefix:
+        if prefix in class_qns:
+            return prefix
+        prefix = prefix.rpartition(".")[0]
+    return None
+
+
+def _follow_reexports(
+    candidate: str,
+    qn_index: Mapping[str, str],
+    module_qns: Set[str] | None,
+    reexports: Mapping[str, Mapping[str, str]] | None,
+) -> str | None:
+    """Look ``candidate`` up, following ``from .x import name`` re-exports.
+
+    ``fastapi.Depends`` is not a node, but module ``fastapi`` binds ``Depends``
+    to ``fastapi.param_functions.Depends``, which is. Each hop rewrites the
+    first segment after the owning module and tries again.
+    """
+    current = candidate
+    visited: set[str] = set()
+    for _ in range(_REEXPORT_MAX_HOPS + 1):
+        if current in qn_index:
+            return qn_index[current]
+        if not reexports or module_qns is None or current in visited:
+            return None
+        visited.add(current)
+        owner = _owning_module(current, module_qns)
+        if owner is None or owner == current:
+            return None
+        remainder = current[len(owner) + 1 :]
+        first, dot, tail = remainder.partition(".")
+        target = reexports.get(owner, {}).get(first)
+        if not target:
+            return None
+        current = f"{target}.{tail}" if dot else target
+    return None
+
+
+def _first_indexed(
+    candidates: Sequence[str],
+    qn_index: Mapping[str, str],
+    module_qns: Set[str] | None,
+    reexports: Mapping[str, Mapping[str, str]] | None,
+) -> str | None:
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        resolved = _follow_reexports(candidate, qn_index, module_qns, reexports)
+        if resolved is not None:
+            return resolved
+    return None
+
+
 def _resolve_name(
     callee: str,
     *,
@@ -1000,23 +1308,76 @@ def _resolve_name(
     caller_qn: str,
     qn_index: dict[str, str],
     name_index: dict[str, list[str]],
+    bindings: Mapping[str, str] | None = None,
+    visible_modules: Set[str] | None = None,
+    module_qns: Set[str] | None = None,
+    class_qns: Set[str] | None = None,
+    reexports: Mapping[str, Mapping[str, str]] | None = None,
 ) -> str | None:
+    """Resolve a textual callee/base name to an indexed qualified name.
+
+    Resolution is by receiver, never by trailing name alone:
+
+    - ``self.run()`` / ``cls.run()`` resolve against the nearest enclosing class
+      (so a closure inside a method still finds the class). ``self.router.get()``
+      is a call on an attribute of unknown type and stays unresolved.
+    - A dotted callee whose head is an import binding follows that binding, then
+      any re-exports (``fastapi.Depends`` -> ``fastapi.param_functions.Depends``).
+    - Same-module and literal spellings are tried next.
+    - Only an undotted name that is still unresolved falls back to a unique
+      bare-name match, limited to modules the file actually imports.
+
+    The old bare-name fallback also fired for dotted callees, which turned
+    ``req.scope.get(...)`` and ``client.get("/")`` into ``CALLS`` edges onto
+    ``FastAPI.get`` / ``APIRouter.get`` and produced self-loops. Unresolved is
+    the correct answer for those.
+
+    Args:
+        callee: Callee or base-class text exactly as written in the source.
+        module: Dotted name of the module containing the reference.
+        caller_qn: Qualified name of the referring entity.
+        qn_index: Known qualified names.
+        name_index: Bare name to qualified names.
+        bindings: Local binding name to dotted target, from ``import_bindings``.
+        visible_modules: Modules the file may resolve into (its own plus imports).
+        module_qns: Every known module qualified name, for ownership lookup.
+        class_qns: Every known class qualified name, for ``self.`` lookup.
+        reexports: Per-module import bindings, for following re-exports.
+
+    Returns:
+        The resolved qualified name, or ``None`` when it cannot be resolved.
+    """
+    head, dot, rest = callee.partition(".")
+    if head in _INSTANCE_NAMES and dot:
+        if "." in rest:
+            return None
+        if class_qns is not None:
+            owner = _enclosing_class(caller_qn, class_qns)
+        else:
+            owner = caller_qn.rpartition(".")[0] or None
+        if owner is None:
+            return None
+        return _first_indexed([f"{owner}.{rest}"], qn_index, module_qns, reexports)
+
     candidates: list[str] = []
-    if callee.startswith("self."):
-        parent = caller_qn.rsplit(".", 1)[0]
-        candidates.append(f"{parent}.{callee.removeprefix('self.')}")
+    if bindings:
+        target = bindings.get(head)
+        if target:
+            candidates.append(f"{target}.{rest}" if dot else target)
     if module:
         candidates.append(f"{module}.{callee}")
     candidates.append(callee)
-    seen: set[str] = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        if candidate in qn_index:
-            return qn_index[candidate]
-    bare = callee.rsplit(".", 1)[-1]
-    matches = name_index.get(bare, [])
+    resolved = _first_indexed(candidates, qn_index, module_qns, reexports)
+    if resolved is not None or dot:
+        return resolved
+
+    matches = name_index.get(callee, [])
+    if visible_modules is not None and module_qns is not None:
+        matches = [
+            match
+            for match in matches
+            if _owning_module(match, module_qns) in visible_modules
+        ]
     if len(matches) == 1:
         return matches[0]
     return None
@@ -1098,13 +1459,17 @@ __all__ = [
     "IndexReport",
     "IndexStatus",
     "already_running_report",
+    "bindings_from_imports",
     "clone_and_index",
     "compute_index_version",
+    "import_bindings",
     "index_file",
     "index_repository",
     "load_index_meta",
     "load_index_status",
+    "load_module_bindings",
     "purge_stale_files",
+    "resolve_relative_module",
     "query_graph_counts",
     "query_label_counts",
     "run_index_file",

@@ -17,7 +17,11 @@ from core.graph.schema import (
     VECTOR_INDEX_NAMES,
 )
 from core.logging import get_logger
-from core.querying.embeddings import EmbeddingProvider
+from core.querying.embeddings import (
+    EMBEDDING_FINGERPRINT_KEY,
+    EmbeddingProvider,
+    provider_fingerprint,
+)
 from core.querying.safety import guard_readonly, has_limit
 from core.querying.templates import (
     DEFAULT_NEIGHBOR_BRANCH_LIMIT,
@@ -34,13 +38,13 @@ from core.querying.templates import (
     TRACE_IMPORTS,
     VECTOR_SEARCH,
 )
-from core.settings import GraphQuerySettings
+from core.settings import DEFAULT_EMBEDDING_MIN_SCORE, EmbeddingSettings, GraphQuerySettings
 
 log = get_logger(__name__)
 
 DEFAULT_RESULT_LIMIT = 200
 DEFAULT_RETRIEVAL_TOP_K = 10
-DEFAULT_EMBEDDING_MIN_SCORE = 0.6
+EMBEDDING_FINGERPRINT_QUERY = "MATCH (m:Meta {key: $key}) RETURN m.value AS value"
 READ_TIMEOUT_S = 10.0
 Direction = Literal["outgoing", "incoming"]
 RetrievalTier = Literal["exact", "fulltext", "lexical"]
@@ -465,6 +469,7 @@ class GraphQueryService:
         *,
         embedding_provider: EmbeddingProvider | None = None,
         embeddings_enabled: bool | None = None,
+        embedding_min_score: float | None = None,
     ) -> None:
         """Create the query service.
 
@@ -476,12 +481,19 @@ class GraphQueryService:
             embeddings_enabled: Override for ``GQ_EMBEDDINGS_ENABLED``. When
                 omitted, the settings flag is authoritative (default off).
                 Passing a provider does not enable the tier by itself.
+            embedding_min_score: Vector-index score floor. Resolved from the
+                configured backend when omitted, since the hash and model
+                backends do not share a score distribution.
         """
         self._client: QueryGraphClient = client if client is not None else GraphClient()
         if embeddings_enabled is None:
             embeddings_enabled = GraphQuerySettings.from_env().embeddings_enabled
         self._embeddings_enabled = embeddings_enabled
         self._embedding_provider = embedding_provider
+        if embedding_min_score is None:
+            embedding_min_score = EmbeddingSettings.from_env().resolve_min_score()
+        self._embedding_min_score = embedding_min_score
+        self._vector_space_ok: bool | None = None
 
     def find_entity(self, name: str, entity_type: str | None = None) -> EntityQueryResult:
         """Match by exact name, then full-text, then optional lexical hash search.
@@ -783,6 +795,44 @@ class GraphQueryService:
             truncated=result.truncated,
         )
 
+    def _vectors_are_comparable(self, provider: EmbeddingProvider) -> bool:
+        """Check the stored vectors came from the backend now being queried.
+
+        Querying a model-built index with hash vectors, or the reverse, returns
+        confident nonsense rather than an error. The indexer records which
+        backend wrote the vectors; if it disagrees with this one, the tier is
+        switched off until a reindex, which is a smaller loss than wrong
+        answers presented as matches.
+        """
+        if self._vector_space_ok is not None:
+            return self._vector_space_ok
+        mine = provider_fingerprint(provider)
+        stored = self._stored_embedding_fingerprint()
+        # Either side may be unknown: an injected stub, or a graph indexed
+        # before fingerprints were recorded. Do not block on missing data.
+        self._vector_space_ok = mine is None or stored is None or mine == stored
+        if not self._vector_space_ok:
+            log.error(
+                "query.vector_space_mismatch",
+                stored=stored,
+                configured=mine,
+                detail="reindex with mode=full, or set the backend that wrote the vectors",
+            )
+        return self._vector_space_ok
+
+    def _stored_embedding_fingerprint(self) -> str | None:
+        try:
+            rows = self._client.run_read(
+                EMBEDDING_FINGERPRINT_QUERY,
+                {"key": EMBEDDING_FINGERPRINT_KEY},
+                timeout_s=READ_TIMEOUT_S,
+            )
+        except Exception as exc:
+            log.warning("query.embedding_fingerprint_failed", error=str(exc))
+            return None
+        value = rows[0].get("value") if rows else None
+        return value if isinstance(value, str) else None
+
     def _embedding_search(
         self,
         query: str,
@@ -790,9 +840,11 @@ class GraphQueryService:
         entity_type: str | None,
         top_k: int,
     ) -> list[EntityHit]:
-        """Score stored hash vectors via the Neo4j vector index (lexical overlap)."""
+        """Score stored vectors via the Neo4j vector index."""
         provider = self._embedding_provider
         if provider is None:
+            return []
+        if not self._vectors_are_comparable(provider):
             return []
         query_vectors = list(provider.embed([query]))
         if not query_vectors or not any(query_vectors[0]):
@@ -815,7 +867,7 @@ class GraphQueryService:
                         "top_k": max(1, int(top_k)),
                         "query_vector": query_vec,
                         "entity_type": entity_type,
-                        "min_score": DEFAULT_EMBEDDING_MIN_SCORE,
+                        "min_score": self._embedding_min_score,
                     },
                 )
             except Exception as exc:

@@ -5,6 +5,10 @@ from core.querying.embeddings import (
     HashingEmbeddingProvider,
     default_embedding_provider,
 )
+from core.querying.openrouter_embeddings import (
+    EmbeddingDimensionError,
+    OpenRouterEmbeddingProvider,
+)
 from core.querying.patterns import PATTERN_TEMPLATES, SUPPORTED_PATTERNS, pattern_cypher
 from core.querying.safety import QueryRejected, guard_readonly
 from core.querying.service import (
@@ -36,6 +40,7 @@ __all__ = [
     "EmbeddingProvider",
     "DocstringHit",
     "DocstringResult",
+    "EmbeddingDimensionError",
     "EntityHit",
     "EntityQueryResult",
     "GraphQueryService",
@@ -44,6 +49,7 @@ __all__ = [
     "ImportTraceResult",
     "NeighborHit",
     "NeighborQueryResult",
+    "OpenRouterEmbeddingProvider",
     "QueryRejected",
     "QueryResult",
     "RelatedHit",

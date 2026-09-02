@@ -48,9 +48,15 @@ class ClassAnalysis(BaseModel):
 
 
 class PatternInstance(BaseModel):
-    """One graph hit for a named structural pattern."""
+    """One graph hit for a named structural pattern.
+
+    ``subject`` is the pattern's own name where it has one -- for the decorator
+    pattern it is the decorator applied (``property``, ``dataclass``), while
+    ``qualified_name`` is the entity it was applied to.
+    """
 
     qualified_name: str
+    subject: str = ""
     file_path: str = ""
     line_start: int | None = None
     line_end: int | None = None

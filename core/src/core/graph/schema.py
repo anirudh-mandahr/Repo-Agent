@@ -5,8 +5,9 @@ Node labels
 - ``:File`` — a source file on disk.
 - ``:Module`` — a Python module.
 - ``:Class`` — a class definition.
-- ``:Function`` — a module-level function.
-- ``:Method`` — a function defined on a class.
+- ``:Function`` — a function not defined directly on a class, including one
+  nested inside another function.
+- ``:Method`` — a function whose immediate parent is a class.
 - ``:Parameter`` — a parameter of a function or method.
 - ``:Decorator`` — a decorator name, shared across uses.
 - ``:Import`` — an import statement.
@@ -27,7 +28,10 @@ Every code node (``Module``, ``Class``, ``Function``, ``Method``) has:
 Relationship types
 ------------------
 - ``CONTAINS`` — ``(:File)-[:CONTAINS]->(:Module)-[:CONTAINS]->(:Class|:Function)``,
-  ``(:Class)-[:CONTAINS]->(:Method)``
+  ``(:Class)-[:CONTAINS]->(:Method)``. Definitions nested inside another
+  definition hang off their real owner instead, so a class declared in a
+  function is ``(:Function)-[:CONTAINS]->(:Class)`` and a closure inside a
+  method is ``(:Method)-[:CONTAINS]->(:Function)``.
 - ``IMPORTS`` — ``(:Module)-[:IMPORTS]->(:Import)``
 - ``INHERITS_FROM`` — ``(:Class)-[:INHERITS_FROM]->(:Class)``
 - ``CALLS`` — ``(:Function|:Method)-[:CALLS]->(:Function|:Method)``

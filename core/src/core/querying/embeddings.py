@@ -1,10 +1,12 @@
 """Pluggable vector protocol and a local hashed bag-of-words fallback.
 
 ``HashingEmbeddingProvider`` is lexical token overlap (256-dim signed hash),
-not a semantic embedding model. Graph Query's third retrieval tier uses this
-when ``GQ_EMBEDDINGS_ENABLED`` is on. Tests inject a stub provider. Indexer
-and graph_query share the same provider so index-time vectors match query-time
-vectors. A real embedding model is future work; keep this protocol as the seam.
+not a semantic embedding model. It is the default so that indexing stays
+offline and free; ``EMBEDDING_BACKEND=openrouter`` swaps in a real model
+behind the same protocol. Graph Query's third retrieval tier uses whichever
+provider is configured when ``GQ_EMBEDDINGS_ENABLED`` is on. Tests inject a
+stub provider. Indexer and graph_query must share one backend so index-time
+vectors are comparable with query-time vectors.
 """
 
 from __future__ import annotations
@@ -16,6 +18,8 @@ from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 from core.graph.schema import VECTOR_INDEX_DIMENSIONS
+from core.logging import get_logger
+from core.settings import EmbeddingSettings
 
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _CAMEL_RE = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|$)|[A-Z]+|[a-z]+|\d+")
@@ -51,6 +55,28 @@ _EMBED_STOPWORDS = frozenset(
 )
 
 
+EMBEDDING_FINGERPRINT_KEY = "embedding_fingerprint"
+
+
+def provider_fingerprint(provider: object) -> str | None:
+    """Identify the vector space a provider produces, if it declares one.
+
+    Vectors from different backends are not comparable, and a mismatch between
+    index time and query time fails silently -- plausible-looking results that
+    are semantically meaningless. Recording this alongside the vectors lets
+    graph_query detect that rather than serve nonsense. Duck-typed so test
+    stubs need not implement it.
+
+    Args:
+        provider: An EmbeddingProvider implementation.
+
+    Returns:
+        A stable identifier, or None when the provider does not declare one.
+    """
+    fingerprint = getattr(provider, "fingerprint", None)
+    return fingerprint if isinstance(fingerprint, str) and fingerprint else None
+
+
 @runtime_checkable
 class EmbeddingProvider(Protocol):
     """Maps texts to dense vectors. Implementations must be deterministic in tests."""
@@ -83,6 +109,7 @@ class HashingEmbeddingProvider:
         if dimensions < 8:
             raise ValueError("embedding dimensions must be at least 8")
         self.dimensions = dimensions
+        self.fingerprint = f"hash:{dimensions}"
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
         """Embed each text as an L2-normalized hashed bag-of-words vector.
@@ -105,7 +132,7 @@ class HashingEmbeddingProvider:
             index = int.from_bytes(digest[:4], "little") % self.dimensions
             sign = 1.0 if digest[4] % 2 == 0 else -1.0
             vector[index] += sign
-        return _l2_normalize(vector)
+        return l2_normalize(vector)
 
 
 def tokenize_for_embedding(text: str) -> list[str]:
@@ -165,13 +192,29 @@ def build_embedding_text(
     return "\n".join(part for part in parts if part).strip()
 
 
-def default_embedding_provider() -> HashingEmbeddingProvider:
-    """Return the shared local embedding backend used by indexer and graph_query.
-    
+def default_embedding_provider() -> EmbeddingProvider:
+    """Return the embedding backend shared by indexer and graph_query.
+
+    ``EMBEDDING_BACKEND=openrouter`` selects a real model; anything else keeps
+    the offline hash fallback. A backend that cannot be built (no API key)
+    degrades to the hash provider rather than failing the caller, so an index
+    still produces a usable graph.
+
     Returns:
-        HashingEmbeddingProvider.
+        EmbeddingProvider.
     """
-    return HashingEmbeddingProvider()
+    settings = EmbeddingSettings.from_env()
+    if settings.backend != "openrouter":
+        return HashingEmbeddingProvider(settings.dimensions)
+    if settings.api_key is None:
+        get_logger("embeddings").warning(
+            "embeddings.hash_fallback",
+            reason="EMBEDDING_BACKEND=openrouter but no API key is set",
+        )
+        return HashingEmbeddingProvider(settings.dimensions)
+    from core.querying.openrouter_embeddings import OpenRouterEmbeddingProvider
+
+    return OpenRouterEmbeddingProvider(settings=settings)
 
 
 def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
@@ -212,7 +255,15 @@ def _stem_token(token: str) -> str:
     return token
 
 
-def _l2_normalize(vector: Sequence[float]) -> list[float]:
+def l2_normalize(vector: Sequence[float]) -> list[float]:
+    """Scale ``vector`` to unit length. A zero vector is returned unchanged.
+
+    Args:
+        vector: Sequence[float].
+
+    Returns:
+        list[float].
+    """
     norm = math.sqrt(sum(value * value for value in vector))
     if norm <= 0.0:
         return [0.0] * len(vector)
@@ -225,5 +276,6 @@ __all__ = [
     "build_embedding_text",
     "cosine_similarity",
     "default_embedding_provider",
+    "l2_normalize",
     "tokenize_for_embedding",
 ]

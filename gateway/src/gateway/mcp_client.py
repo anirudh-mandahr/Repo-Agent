@@ -361,3 +361,12 @@ class _IndexerGatewayClient:
             correlation_id=correlation_id,
             timeout_s=self._timeout_s,
         )
+
+    async def get_index_status(self, *, correlation_id: str) -> Any:
+        return await self._pool.call(
+            "indexer",
+            "get_index_status",
+            {},
+            correlation_id=correlation_id,
+            timeout_s=self._timeout_s,
+        )

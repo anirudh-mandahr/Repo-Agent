@@ -160,6 +160,6 @@ so they are left failing and documented as known limitations instead.
 
 ## Guardrail status
 
-The 9 assignment queries in `evals/routing.jsonl` are **9/9 PASS** after every change,
+The 9 sample queries in `evals/routing.jsonl` are **9/9 PASS** after every change,
 with all expected agents matched and retrieval PASS on each. Offline suite: 496 passed
 (490 + 6 new tests). Integration + live: 14 passed.

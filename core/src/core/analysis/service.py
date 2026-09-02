@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
@@ -50,6 +51,10 @@ log = get_logger(__name__)
 MAX_PROMPT_SNIPPET_LINES = 120
 MAX_PROMPT_LIST_ITEMS = 40
 FIND_PATTERNS_MAX_TOKENS = 2048
+# A structured explanation cut off at the provider default (1024) arrives
+# truncated mid-JSON and fails schema validation, so the calls that build large
+# prompts -- whole classes, side-by-side comparisons -- get their own headroom.
+EXPLANATION_MAX_TOKENS = 2048
 
 
 class GraphLookup(Protocol):
@@ -198,6 +203,7 @@ class CodeAnalystService:
         instances = [
             PatternInstance(
                 qualified_name=_str(row.get("qualified_name")),
+                subject=_str(row.get("subject")),
                 file_path=_str(row.get("file_path")),
                 line_start=_opt_int(row.get("line_start")),
                 line_end=_opt_int(row.get("line_end")),
@@ -220,7 +226,8 @@ class CodeAnalystService:
             return PatternAnalysis(
                 pattern=pattern,
                 summary=(
-                    f"Found {len(instances)} {pattern} instances in the indexed graph. "
+                    f"Found {len(instances)} {pattern} instances in the indexed graph"
+                    f"{_subject_tally(instances)}. "
                     "Per-instance explanations were skipped because the result set is large."
                 ),
                 instances=instances,
@@ -230,8 +237,16 @@ class CodeAnalystService:
             FIND_PATTERNS_PROMPT,
             {
                 "pattern": pattern,
+                "subjects": _subject_tally(instances).lstrip(": ") or "n/a",
                 "instances": _bullets(
-                    _limited([item.qualified_name for item in instances])
+                    _limited(
+                        [
+                            f"{item.subject} on {item.qualified_name}"
+                            if item.subject
+                            else item.qualified_name
+                            for item in instances
+                        ]
+                    )
                 ),
             },
         )
@@ -253,6 +268,7 @@ class CodeAnalystService:
             )
             return PatternAnalysis(
                 pattern=pattern,
+                summary=_with_subject_tally("", pattern, instances),
                 instances=instances,
                 supported_patterns=list(SUPPORTED_PATTERNS),
             )
@@ -270,6 +286,11 @@ class CodeAnalystService:
         parsed = parsed.model_copy(update={"instances": merged, "pattern": pattern})
         if not parsed.supported_patterns:
             parsed = parsed.model_copy(update={"supported_patterns": list(SUPPORTED_PATTERNS)})
+        # The tally is a graph fact, so state it here rather than trusting the
+        # explanation model to echo it back correctly.
+        parsed = parsed.model_copy(
+            update={"summary": _with_subject_tally(parsed.summary, pattern, instances)}
+        )
         return parsed
 
     async def get_code_snippet(
@@ -359,6 +380,7 @@ class CodeAnalystService:
                 EXPLAIN_IMPLEMENTATION_SYSTEM,
                 prompt,
                 ImplementationExplanation,
+                max_tokens=EXPLANATION_MAX_TOKENS,
             )
             return _require_parsed(
                 result,
@@ -396,6 +418,7 @@ class CodeAnalystService:
             EXPLAIN_CLASS_SYSTEM,
             prompt,
             ImplementationExplanation,
+            max_tokens=EXPLANATION_MAX_TOKENS,
         )
         return _require_parsed(result, ImplementationExplanation, agent=self._agent)
 
@@ -454,6 +477,7 @@ class CodeAnalystService:
             COMPARE_IMPLEMENTATIONS_SYSTEM,
             prompt,
             ImplementationComparison,
+            max_tokens=EXPLANATION_MAX_TOKENS,
         )
         return _require_parsed(result, ImplementationComparison, agent=self._agent)
 
@@ -622,6 +646,32 @@ def _str_list(value: Any) -> list[str]:
         return items
     text = _str(value)
     return [text] if text else []
+
+
+def _with_subject_tally(
+    summary: str,
+    pattern: str,
+    instances: Sequence[PatternInstance],
+) -> str:
+    """Prefix ``summary`` with the deterministic subject tally, if there is one."""
+    tally = _subject_tally(instances)
+    if not tally:
+        return summary
+    stated = f"Found {len(instances)} {pattern} applications{tally}."
+    return f"{stated} {summary}".strip() if summary else stated
+
+
+def _subject_tally(instances: Sequence[PatternInstance]) -> str:
+    """Render ``": property (7), dataclass (4)"`` for instances that name a subject.
+
+    Returns an empty string when the pattern has no subject of its own, so
+    callers can append it unconditionally.
+    """
+    counts = Counter(item.subject for item in instances if item.subject)
+    if not counts:
+        return ""
+    parts = [f"{name} ({count})" for name, count in counts.most_common()]
+    return ": " + ", ".join(parts)
 
 
 def _bullets(items: Sequence[str]) -> str:
