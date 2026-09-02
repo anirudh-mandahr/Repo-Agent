@@ -6,8 +6,8 @@ Base URL: `http://localhost:8000`. Compose sets `GATEWAY_API_KEY` to `dev-gatewa
 | --- | --- | --- |
 | `POST` | `/api/chat` | Chat (JSON body; `stream=true` for SSE) |
 | `WS` | `/ws/chat` | WebSocket chat (same event protocol) |
-| `POST` | `/api/index` | Start background index job (`mode`: `incremental` hash-skip or `full` re-parse) |
-| `GET` | `/api/index/status/{job_id}` | Poll index job status |
+| `POST` | `/api/index` | Start background index job (`mode`: `incremental` hash-skip or `full` re-parse). Returns a `job_id`; the gateway follows the indexer by polling, not by holding the MCP call open |
+| `GET` | `/api/index/status/{job_id}` | Poll index job status (`pending` / `running` / `done` / `failed`) |
 | `GET` | `/api/agents/health` | Per-agent health aggregation |
 | `GET` | `/api/graph/statistics` | Graph counts + `index_version` |
 | `GET` | `/health` | Alias for agents health |
@@ -50,12 +50,16 @@ curl -s http://localhost:8000/api/index \
   -d '{"mode":"incremental"}' | jq .
 ```
 
+The HTTP request returns immediately with `{"job_id": "..."}`. The gateway dispatches `index_repository` and then polls `get_index_status` (`GATEWAY_INDEX_POLL_INTERVAL_S`, default 2s) until the indexer finishes or `GATEWAY_INDEX_TIMEOUT_S` (default 3600s) elapses. `GATEWAY_REQUEST_TIMEOUT_S` (default 10s) still bounds a single MCP round trip; it is not the job ceiling. Job records are in-process: a gateway restart loses them even if the indexer is still running.
+
 **Index job status**
 
 ```bash
 curl -s http://localhost:8000/api/index/status/<job_id> \
   -H 'X-API-Key: dev-gateway-key' | jq .
 ```
+
+`status` is `pending`, `running`, `done`, or `failed`. On `done`, `report` is the indexer's `IndexReport` (`files_indexed`, `nodes_written`, `duration_s`, …). On `failed`, `error` is set. Unknown `job_id` is `404`.
 
 **Agents health**
 

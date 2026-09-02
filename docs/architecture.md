@@ -108,6 +108,8 @@ The orchestrator request budget and latency hierarchy — how the request deadli
 
 **Design points:** Content-hash incremental indexing at file granularity (`mode="incremental"`, the default). `POST /api/index` `mode="full"` re-parses every file even when hashes match. Stale `:File` nodes whose paths disappeared from the walk are `DETACH DELETE`d. `UNWIND` batched writes. Shared `:Decorator` nodes survive file-subtree deletes. Async lock prevents concurrent full indexes. Default crawl includes `tests/` and `docs/`; set `INDEX_SKIP_TESTS=1` and `INDEX_SKIP_DOCS=1` for a fast profile.
 
+The gateway does not await `index_repository` for the whole pass: that call outlives `GATEWAY_REQUEST_TIMEOUT_S` (default 10s). It fires the dispatch and follows the job by polling `get_index_status` (`GATEWAY_INDEX_POLL_INTERVAL_S`, `GATEWAY_INDEX_START_GRACE_S`, `GATEWAY_INDEX_TIMEOUT_S`). Job ids still live in an in-process gateway dict, so they are lost on restart. After structural upserts, the indexer embeds `Class` / `Function` / `Method` nodes in chunks (`EMBEDDING_BACKEND`, default `hash`) and records `embedding_fingerprint` on `:Meta` so graph_query can refuse a mismatched vector space.
+
 ### Graph Query (`:8003`)
 
 **Responsibility:** Read-only Cypher over the knowledge graph. Template queries for common traversals plus guarded ad-hoc Cypher.
@@ -126,11 +128,11 @@ The orchestrator request budget and latency hierarchy — how the request deadli
 | `execute_query(cypher, params=None)` | read-only Cypher | `QueryResult` (includes `cypher_executed`, `params`) |
 | `get_statistics()` | — | `GraphStatistics` (`index_version`, label/rel counts) |
 
-**Design points:** Write clauses rejected; default `LIMIT` injected. Trusted `CALL db.index.fulltext.queryNodes` is allowed for the `code_search` index over names, qualified names, and docstring text. `find_entity` runs a cascade: exact name, then identifier re-export resolution via `(:Module)-[:IMPORTS]->(:Import)`, then full-text (package source before tests/docs), then optional hash-based lexical fallback when `GQ_EMBEDDINGS_ENABLED=1`.
+**Design points:** Write clauses rejected; default `LIMIT` injected. Trusted `CALL db.index.fulltext.queryNodes` is allowed for the `code_search` index over names, qualified names, and docstring text. Trusted `CALL db.index.vector.queryNodes` is allowed for the per-label embedding indexes. `find_entity` runs a cascade: exact name, then identifier re-export resolution via `(:Module)-[:IMPORTS]->(:Import)`, then full-text (package source before tests/docs), then optional vector search when `GQ_EMBEDDINGS_ENABLED=1`.
 
 The re-export tier resolves once per query rather than per import edge: if any import edge joins to a real `Class` / `Function` / `Method` node, only those real nodes are returned (`fastapi.FastAPI` → `fastapi.applications.FastAPI`, one hit, not one per importer). Only when *no* edge resolves — the symbol is defined outside the indexed tree, as `WebSocket`, `JSONResponse`, `CORSMiddleware`, and `Request` are in starlette — does it fall back to the importing `Module` nodes, preferring FastAPI-local ones, so `fastapi/websockets.py` is still attributed. Fallback hits are real `Module` nodes scored 0.6; no coordinate is synthesized.
 
-Hits are ordered by retrieval tier, package vs tests/docs, `fastapi/` locality, and filename affinity to the symbol. Conceptual questions are mapped onto concrete identifiers by `_CONCEPT_ENTITIES` for three families: dependency injection/resolution (`Depends`, `get_dependant`, `solve_dependencies`), request lifecycle (`APIRoute.get_request_handler`, `run_endpoint_function`, `serialize_response`), and request validation (`request_params_to_args`, `request_body_to_args`, `RequestValidationError`). The lexical tier is a 256-dim bag-of-words hash (`HashingEmbeddingProvider`), not a semantic embedding model. `:Meta` singleton stores `index_version` for cache invalidation.
+Hits are ordered by retrieval tier, package vs tests/docs, `fastapi/` locality, and filename affinity to the symbol. Conceptual questions are mapped onto concrete identifiers by `_CONCEPT_ENTITIES` for three families: dependency injection/resolution (`Depends`, `get_dependant`, `solve_dependencies`), request lifecycle (`APIRoute.get_request_handler`, `run_endpoint_function`, `serialize_response`), and request validation (`request_params_to_args`, `request_body_to_args`, `RequestValidationError`). The vector tier still tags hits `lexical`. Default backend is a 256-dim bag-of-words hash (`HashingEmbeddingProvider`); `EMBEDDING_BACKEND=openrouter` swaps in a real model behind the same `EmbeddingProvider` protocol and the same Neo4j vector indexes (`vector.dimensions` 256, cosine). Indexer and graph_query must share one backend: the indexer writes `embedding_fingerprint` on `:Meta`, and a mismatch disables the tier rather than ranking incomparable vectors. `:Meta` also stores `index_version` for cache invalidation.
 
 ### Code Analyst (`:8004`)
 
@@ -175,5 +177,7 @@ Hits are ordered by retrieval tier, package vs tests/docs, `fastapi/` locality, 
 **Node labels:** `Module`, `Class`, `Function`, `Method`, `Parameter`, `Decorator`, `Import`, `Docstring`, `File`, `Meta`
 
 **Relationships:** `CONTAINS`, `IMPORTS`, `INHERITS_FROM`, `CALLS`, `DECORATED_BY`, `HAS_PARAMETER`, `DOCUMENTED_BY`, `DEPENDS_ON`
+
+**Vectors:** `Class`, `Function`, and `Method` nodes store `embedding` (256 floats) and `embedding_text`. Three cosine vector indexes (`class_embeddings`, `function_embeddings`, `method_embeddings`) are created with `ensure_schema`. Changing the dimension requires dropping and recreating those indexes.
 
 After indexing FastAPI (2026-08-18, `GET /api/graph/statistics`): 1136 files, 16372 nodes, 21550 relationships, `index_version` `aea924f3e4eb27dfba54c0bd76f871a139f10f2bd709388f7aa2c817a5205e5f`.

@@ -127,7 +127,7 @@ Configuration reference (every env var per agent): [docs/configuration.md](docs/
 
 The Indexer clones FastAPI into the `/repo` volume, walks Python files, extracts AST entities, and writes the graph with Cypher `UNWIND` — batched upserts, not one round-trip per node. Default mode is **incremental**: a content hash per file skips anything unchanged. `mode=full` re-parses every file.
 
-Indexing is a background job with a job id, so a slow repo does not hold an HTTP connection open.
+Indexing is a background job with a job id, so a slow repo does not hold an HTTP connection open. The gateway fires `index_repository` and follows the pass by polling `get_index_status`; it does not await the MCP call for the whole index (that used to hit the 10s request timeout and report `failed` while the indexer kept going). Poll until `status` is `done` or `failed` — a first GET often still shows `running`.
 
 ```bash
 export KEY=dev-gateway-key
@@ -447,14 +447,14 @@ Scope cuts, each measured and reported by the eval suite rather than hidden. The
 | `CALLS` edges | Resolved by callee name; no cross-module type inference |
 | `find_patterns` | Three templates: decorator, dependency injection, factory |
 | Incremental index | Per file, not per line |
-| Index job list | In-process dict in the gateway; gone on restart |
-| Lexical fallback | Hashing bag-of-words, off by default (`GQ_EMBEDDINGS_ENABLED`) |
+| Index job list | In-process dict in the gateway; gone on restart. Status is polled from the indexer, so a job outlives the MCP request timeout |
+| Embedding backend | Defaults to hashing bag-of-words. `EMBEDDING_BACKEND=openrouter` is a real model; switch either way with `mode=full`. Retrieval tier off unless `GQ_EMBEDDINGS_ENABLED=1` |
 | Follow-up “it” | Regex + entity carry, not a coreference model |
 | Starlette symbols | No node of their own; we cite the FastAPI module that re-exports them |
 | Concept mapping | Three families only (DI, lifecycle, validation). Query `c09` (“how do routing, OpenAPI, and dependencies connect”) is the 0.99 miss |
 | Shared API key | Fine for a compose demo, not per-user auth |
 
-The real fix for the red metrics is an embedding tier. The `EmbeddingProvider` protocol is already the seam for it.
+A real embedding model is available behind `EMBEDDING_BACKEND=openrouter`. The remaining eval miss on conceptual queries is still mostly concept-to-entity mapping, not the missing protocol.
 
 ---
 

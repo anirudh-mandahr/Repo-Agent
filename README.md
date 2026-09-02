@@ -111,8 +111,8 @@ curl -s http://localhost:8000/api/chat \
 | --- | --- | --- |
 | `POST` | `/api/chat` | Chat (JSON body; `stream=true` for SSE) |
 | `WS` | `/ws/chat` | WebSocket chat (same event protocol) |
-| `POST` | `/api/index` | Start background index job (`incremental` hash-skip or `full` re-parse) |
-| `GET` | `/api/index/status/{job_id}` | Poll index job status |
+| `POST` | `/api/index` | Start background index job (`incremental` hash-skip or `full` re-parse). Gateway follows the indexer by polling; does not hold the MCP call for the whole pass |
+| `GET` | `/api/index/status/{job_id}` | Poll index job status (`pending` / `running` / `done` / `failed`) |
 | `GET` | `/api/agents/health` | Per-agent health aggregation |
 | `GET` | `/api/graph/statistics` | Graph counts + `index_version` |
 | `GET` | `/health` | Alias for agents health |
@@ -150,7 +150,7 @@ LLM spend is treated as a budget to engineer against. The offline suite (`make t
 | Third-party symbols | Names defined in starlette have no graph node. `find_entity` falls back to the FastAPI module that re-exports them |
 | Concept-to-entity mapping | `_CONCEPT_ENTITIES` covers dependency injection, request lifecycle, and request validation. Purely conceptual queries outside that table still miss labelled entities |
 
-**Future work:** a Redis/SQS job queue replacing the in-process index registry, for durability across restarts and cross-replica coordination; gating the embedding retrieval tier so it only runs when the exact and full-text tiers come up short, rather than on every `find_entity`; retuning `DEFAULT_EMBEDDING_MIN_SCORE`, which was fitted to hash-vector cosines; model-based coreference; a fitted synthesis-reserve latency slope.
+**Future work:** a Redis/SQS job queue replacing the in-process index registry, for durability across restarts and cross-replica coordination; gating the embedding retrieval tier so it only runs when the exact and full-text tiers come up short, rather than on every `find_entity`; model-based coreference; a fitted synthesis-reserve latency slope.
 
 ---
 
