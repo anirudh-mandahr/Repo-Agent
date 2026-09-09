@@ -17,6 +17,10 @@ jobs:
       LIVE_STACK: "1"
       GATEWAY_URL: http://127.0.0.1:8000
       GATEWAY_API_KEY: dev-gateway-key
+      # Compose interpolates this into orchestrator, code_analyst and memory.
+      # An empty value selects OfflineProvider, whose stub answer carries no
+      # file citations and fails the grounded-answer live test.
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
