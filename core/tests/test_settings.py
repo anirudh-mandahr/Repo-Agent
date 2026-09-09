@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -132,19 +133,26 @@ def test_env_example_documents_required_settings() -> None:
 
 
 def test_committed_env_files_exclude_secret_values() -> None:
-    for path in (
-        _ENV_EXAMPLE,
-        _REPO_ROOT / ".env.development",
-        _REPO_ROOT / ".env.production",
-    ):
-        assert path.is_file(), f"missing {path.name}"
-        for line in path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            key, _, value = stripped.partition("=")
-            if key in _SECRET_KEYS:
-                assert value.strip() == "", f"{path.name} must not assign {key}"
+    assert _ENV_EXAMPLE.is_file(), f"missing {_ENV_EXAMPLE.name}"
+    for line in _ENV_EXAMPLE.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        key, _, value = stripped.partition("=")
+        if key in _SECRET_KEYS:
+            assert value.strip() == "", f"{_ENV_EXAMPLE.name} must not assign {key}"
+
+
+def test_env_example_is_the_only_committed_env_file() -> None:
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z", "--", ".env*"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    committed = {name for name in tracked.split("\0") if name}
+    assert committed == {".env.example"}, f"unexpected committed env files: {committed}"
 
 
 def test_orchestrator_breaker_overrides_load_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

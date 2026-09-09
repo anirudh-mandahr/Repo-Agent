@@ -12,6 +12,8 @@ build/
 .coverage.*
 htmlcov/
 .env
+.env.*
+!.env.example
 learnings.md
 *.log
 .DS_Store
