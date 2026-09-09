@@ -35,7 +35,7 @@ jobs:
         run: docker compose up --build -d
       - name: Wait for gateway
         run: |
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             if curl -fsS -H "X-API-Key: $GATEWAY_API_KEY" "$GATEWAY_URL/health" >/dev/null; then
               exit 0
             fi
@@ -61,13 +61,14 @@ jobs:
       NEO4J_USER: neo4j
       NEO4J_PASSWORD: changeme123
       NEO4J_AUTH: neo4j/changeme123
-      REPO_ROOT: ${{ runner.temp }}/fastapi
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Resolve REPO_ROOT
+        run: echo "REPO_ROOT=$RUNNER_TEMP/fastapi" >> "$GITHUB_ENV"
       - name: Prepare env file
         run: cp .env.example .env
       - name: Clone FastAPI source
