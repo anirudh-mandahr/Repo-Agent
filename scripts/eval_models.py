@@ -11,6 +11,7 @@ from pathlib import Path
 
 os.environ.setdefault("LOG_LEVEL", "ERROR")
 
+from core.eval.bakeoff_store import load_bakeoff, merge_bakeoffs, save_bakeoff
 from core.eval.harness import load_qa_cases
 from core.eval.model_bakeoff import (
     DEFAULT_BAKEOFF_MODELS,
@@ -25,6 +26,11 @@ from core.eval.model_bakeoff import (
     run_router_bakeoff,
     run_synthesis_bakeoff,
     write_model_bakeoff_section,
+)
+from core.eval.routing_providers import (
+    is_typesafe_model,
+    routing_provider_factory,
+    typesafe_key_present,
 )
 from core.settings import AnalysisSettings, LLMSettings
 
@@ -69,6 +75,20 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Patch the docs/evaluation.md model-bakeoff section.",
     )
+    parser.add_argument(
+        "--save",
+        type=Path,
+        default=None,
+        help="Write the routing report to this JSON file for a later --compare.",
+    )
+    parser.add_argument(
+        "--compare",
+        default=None,
+        help=(
+            "Comma-separated JSON reports saved by --save. Merges and prints them "
+            "without running anything, for arms captured at different times."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -100,9 +120,16 @@ async def _run(args: argparse.Namespace) -> list[PurposeBakeoff]:
     cases = load_qa_cases()
     reports: list[PurposeBakeoff] = []
     if args.purpose in {"routing", "both"}:
-        reports.append(
-            await run_router_bakeoff(models, cases, repeats=args.repeats)
+        routing = await run_router_bakeoff(
+            models,
+            cases,
+            repeats=args.repeats,
+            provider_factory=routing_provider_factory,
         )
+        if args.save is not None:
+            save_bakeoff(routing, args.save)
+            print(f"saved routing report -> {args.save}", file=sys.stderr)
+        reports.append(routing)
     if args.purpose in {"synthesis", "both"}:
         await _maybe_capture(args.fixtures, force=args.capture)
         if not args.fixtures.exists():
@@ -134,14 +161,37 @@ async def _run(args: argparse.Namespace) -> list[PurposeBakeoff]:
 def main(argv: Sequence[str] | None = None) -> None:
     """Run the bake-off and print markdown tables. Exit 0 even without a winner."""
     args = _parse_args(argv)
+    if args.compare:
+        paths = [Path(item.strip()) for item in args.compare.split(",") if item.strip()]
+        missing = [str(path) for path in paths if not path.exists()]
+        if missing:
+            print(f"saved report(s) not found: {', '.join(missing)}", file=sys.stderr)
+            raise SystemExit(1)
+        merged = merge_bakeoffs([load_bakeoff(path) for path in paths])
+        print(format_purpose_table(merged), flush=True)
+        if args.write_readme:
+            write_model_bakeoff_section([merged])
+            print("Wrote model bake-off tables into docs/evaluation.md", flush=True)
+        return
     if args.repeats < 1:
         print("repeats must be >= 1", file=sys.stderr)
         raise SystemExit(2)
+    models = parse_models_arg(args.models)
     settings = LLMSettings.from_env()
-    if not settings.api_key:
+    needs_openrouter = args.purpose != "routing" or any(
+        not is_typesafe_model(model) for model in models
+    )
+    if needs_openrouter and not settings.api_key:
         print(
             "OPENROUTER_API_KEY is unset; bake-off requires a live provider "
             "(unit tests inject StubProvider).",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if any(is_typesafe_model(model) for model in models) and not typesafe_key_present():
+        print(
+            "--models includes a TypeSafe model but no TypeSafe key was found "
+            "in the environment or .env (TYPESAFE_API_KEY).",
             file=sys.stderr,
         )
         raise SystemExit(2)

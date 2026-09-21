@@ -1,0 +1,88 @@
+{
+  "purpose": "routing",
+  "captured_at": "2026-09-21",
+  "price_as_of": "2026-08-18",
+  "repeats": 3,
+  "n_queries": 58,
+  "notes": [
+    "Router bake-off calls the routing prompt directly; Neo4j is not used.",
+    "Production routing is rules-first; this table scores the LLM router in isolation.",
+    "Quality is exact-match on expected_agents (set equality).",
+    "Schema-failure rate is 1 \u2212 first-attempt schema-validity."
+  ],
+  "rows": [
+    {
+      "model": "typesafe/jev-latest",
+      "quality": {
+        "mean": 0.6794871794871794,
+        "spread": 0.009615384615384581,
+        "values": [
+          0.6730769230769231,
+          0.6730769230769231,
+          0.6923076923076923
+        ]
+      },
+      "trap_pass": {
+        "mean": 0.611111111111111,
+        "spread": 0.08333333333333331,
+        "values": [
+          0.5,
+          0.6666666666666666,
+          0.6666666666666666
+        ]
+      },
+      "schema_failure": {
+        "mean": 0.0,
+        "spread": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "p50_latency_ms": {
+        "mean": 1043.3213823319722,
+        "spread": 6.689031491987407,
+        "values": [
+          1048.0834589980077,
+          1047.1752919838764,
+          1034.7053960140329
+        ]
+      },
+      "p95_latency_ms": {
+        "mean": 1346.7268996726489,
+        "spread": 167.08038122451399,
+        "values": [
+          1419.4557400391204,
+          1477.442860713927,
+          1143.282098264899
+        ]
+      },
+      "cost_per_query": {
+        "mean": 3.755306896551724e-05,
+        "spread": 0.0,
+        "values": [
+          3.755306896551724e-05,
+          3.755306896551724e-05,
+          3.755306896551724e-05
+        ]
+      },
+      "cost_per_1000": {
+        "mean": 0.037553068965517244,
+        "spread": 0.0,
+        "values": [
+          0.037553068965517244,
+          0.037553068965517244,
+          0.037553068965517244
+        ]
+      },
+      "rates": {
+        "prompt_usd_per_million": 0.042,
+        "completion_usd_per_million": 0.0,
+        "cached_prompt_usd_per_million": 0.042
+      },
+      "price_label": "typesafe/jev-latest: $0.042 in / $0.000 out / $0.042 cached per 1M (as of 2026-08-18)",
+      "repeats": 3
+    }
+  ]
+}

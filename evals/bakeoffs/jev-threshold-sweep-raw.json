@@ -1,0 +1,2421 @@
+{
+  "model": "typesafe/jev-latest",
+  "turns": [
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.98,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.02,
+            "indexing": 0.0,
+            "lookup": 0.98,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.25,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.26,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.07,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.06,
+          "type": "noul"
+        }
+      },
+      "case_id": "s01",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "What is the FastAPI class?",
+      "tier": "simple"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "relationship",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 1.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.32,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.89,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.08,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.05,
+          "type": "noul"
+        }
+      },
+      "case_id": "s02",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "What classes inherit from APIRouter?",
+      "tier": "simple"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.88,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.1,
+            "indexing": 0.0,
+            "lookup": 0.9,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.35,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.23,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.07,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.06,
+          "type": "noul"
+        }
+      },
+      "case_id": "s03",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "What is APIRouter?",
+      "tier": "simple"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.0,
+            "indexing": 0.0,
+            "lookup": 1.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.23,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.89,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.07,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.07,
+          "type": "noul"
+        }
+      },
+      "case_id": "s04",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "Where is get_openapi?",
+      "tier": "simple"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.95,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.04,
+            "indexing": 0.0,
+            "lookup": 0.96,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.27,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.25,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.05,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.06,
+          "type": "noul"
+        }
+      },
+      "case_id": "s05",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "What is HTTPException?",
+      "tier": "simple"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.99,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.0,
+            "indexing": 0.0,
+            "lookup": 1.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.23,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.91,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.09,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.08,
+          "type": "noul"
+        }
+      },
+      "case_id": "s06",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "Find BackgroundTasks",
+      "tier": "simple"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.97,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.03,
+            "indexing": 0.0,
+            "lookup": 0.97,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.32,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.29,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.07,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.07,
+          "type": "noul"
+        }
+      },
+      "case_id": "s07",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "What is UploadFile?",
+      "tier": "simple"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.92,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.06,
+            "indexing": 0.0,
+            "lookup": 0.9400000000000001,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.21,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.24,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.06,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.07,
+          "type": "noul"
+        }
+      },
+      "case_id": "s08",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "What is APIRoute?",
+      "tier": "simple"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "relationship",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 1.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.18,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.47,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.08,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.06,
+          "type": "noul"
+        }
+      },
+      "case_id": "s09",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "Who depends on FastAPI?",
+      "tier": "simple"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.66,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.29,
+            "indexing": 0.0,
+            "lookup": 0.71,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.07,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.06,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.04,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.05,
+          "type": "noul"
+        }
+      },
+      "case_id": "s10",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "What is WebSocket?",
+      "tier": "simple"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.63,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.01,
+            "indexing": 0.2,
+            "lookup": 0.7,
+            "mixed": 0.04,
+            "pattern": 0.05,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.22,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.29,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.07,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.12,
+          "type": "noul"
+        }
+      },
+      "case_id": "s11",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "List Query",
+      "tier": "simple"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.79,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.17,
+            "indexing": 0.0,
+            "lookup": 0.8099999999999999,
+            "mixed": 0.0,
+            "pattern": 0.01,
+            "relationship": 0.01
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.26,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.2,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.07,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.08,
+          "type": "noul"
+        }
+      },
+      "case_id": "s12",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "What is Depends?",
+      "tier": "simple"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 0.44,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.53,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.32,
+            "pattern": 0.15,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.89,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.95,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.12,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.08,
+          "type": "noul"
+        }
+      },
+      "case_id": "m01",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "How does dependency injection work and show me examples from the codebase",
+      "tier": "medium"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 1.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.9,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.95,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.09,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.06,
+          "type": "noul"
+        }
+      },
+      "case_id": "m02",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Explain how get_openapi is implemented in the codebase",
+      "tier": "medium"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 0.58,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.64,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.35,
+            "pattern": 0.01,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.77,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.55,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.07,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.06,
+          "type": "noul"
+        }
+      },
+      "case_id": "m03",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "How does FastAPI handle middleware and show me the implementation",
+      "tier": "medium"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 1.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.91,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.92,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.09,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.08,
+          "type": "noul"
+        }
+      },
+      "case_id": "m04",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Explain CORSMiddleware implementation in the codebase",
+      "tier": "medium"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 0.98,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.99,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.01,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.84,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.89,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.08,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.07,
+          "type": "noul"
+        }
+      },
+      "case_id": "m05",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "How does lifespan work in FastAPI source",
+      "tier": "medium"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 0.59,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.65,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.35,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.89,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.93,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.11,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.07,
+          "type": "noul"
+        }
+      },
+      "case_id": "m06",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Explain how APIRouter includes routes and show me the implementation in the codebase",
+      "tier": "medium"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 1.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.91,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.93,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.08,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.07,
+          "type": "noul"
+        }
+      },
+      "case_id": "m07",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Explain HTTPException implementation in the codebase",
+      "tier": "medium"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 0.9,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.92,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.05,
+            "relationship": 0.03
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.77,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.65,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.1,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.08,
+          "type": "noul"
+        }
+      },
+      "case_id": "m08",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "How does dependency resolution work in the codebase",
+      "tier": "medium"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 1.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.92,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.92,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.11,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.07,
+          "type": "noul"
+        }
+      },
+      "case_id": "m09",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Explain TestClient implementation with examples from the source",
+      "tier": "medium"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 0.99,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.98,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.01,
+            "relationship": 0.01
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.85,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.9,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.09,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.08,
+          "type": "noul"
+        }
+      },
+      "case_id": "m10",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "How does WebSocket routing work in the codebase",
+      "tier": "medium"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 1.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.91,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.93,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.09,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.07,
+          "type": "noul"
+        }
+      },
+      "case_id": "m11",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Explain OAuth2PasswordBearer implementation in the codebase",
+      "tier": "medium"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 0.44,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.52,
+            "indexing": 0.0,
+            "lookup": 0.02,
+            "mixed": 0.46,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.83,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.93,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.08,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.08,
+          "type": "noul"
+        }
+      },
+      "case_id": "m12",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "How does APIRoute serialize responses and show me the source",
+      "tier": "medium"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "comparison",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 1.0,
+            "explanation": 0.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.91,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.91,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.08,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.08,
+          "type": "noul"
+        }
+      },
+      "case_id": "c01",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Compare FastAPI and APIRouter implementations in the codebase",
+      "tier": "complex"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "mixed",
+          "confidence": 0.95,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.03,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.96,
+            "pattern": 0.0,
+            "relationship": 0.01
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.88,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.93,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.1,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.06,
+          "type": "noul"
+        }
+      },
+      "case_id": "c02",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Explain how get_openapi is implemented and who calls it",
+      "tier": "complex"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "mixed",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 1.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.94,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.94,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.98,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.08,
+          "type": "noul"
+        }
+      },
+      "case_id": "c03",
+      "expected_agents": [
+        "indexer",
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Reindex the repository and explain dependency injection examples in the codebase",
+      "tier": "complex"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "mixed",
+          "confidence": 0.98,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.0,
+            "indexing": 0.01,
+            "lookup": 0.0,
+            "mixed": 0.98,
+            "pattern": 0.0,
+            "relationship": 0.01
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.85,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.95,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.96,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.08,
+          "type": "noul"
+        }
+      },
+      "case_id": "c04",
+      "expected_agents": [
+        "indexer",
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Reindex the repository and trace how APIRouter imports connect to FastAPI",
+      "tier": "complex"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "mixed",
+          "confidence": 0.99,
+          "probabilities": {
+            "comparison": 0.01,
+            "explanation": 0.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.99,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.85,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.93,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.1,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.07,
+          "type": "noul"
+        }
+      },
+      "case_id": "c05",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Compare FastAPI and APIRouter implementations, then show who depends on them",
+      "tier": "complex"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "relationship",
+          "confidence": 0.75,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.03,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.18,
+            "pattern": 0.0,
+            "relationship": 0.79
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.91,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.89,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.08,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.08,
+          "type": "noul"
+        }
+      },
+      "case_id": "c06",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Explain how dependency injection, APIRouter, and get_openapi connect across the codebase",
+      "tier": "complex"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "comparison",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 1.0,
+            "explanation": 0.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.9,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.94,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.11,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.08,
+          "type": "noul"
+        }
+      },
+      "case_id": "c07",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Compare Depends and Security implementations in the codebase",
+      "tier": "complex"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "relationship",
+          "confidence": 0.95,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.04,
+            "pattern": 0.0,
+            "relationship": 0.96
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.85,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.96,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.11,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.06,
+          "type": "noul"
+        }
+      },
+      "case_id": "c08",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Trace how APIRouter imports connect to FastAPI, then show who depends on them in the codebase",
+      "tier": "complex"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "relationship",
+          "confidence": 0.69,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.05,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.21,
+            "pattern": 0.0,
+            "relationship": 0.74
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.91,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.92,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.09,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.07,
+          "type": "noul"
+        }
+      },
+      "case_id": "c09",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Explain how routing, OpenAPI, and dependencies connect across the codebase",
+      "tier": "complex"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "mixed",
+          "confidence": 0.99,
+          "probabilities": {
+            "comparison": 0.01,
+            "explanation": 0.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.99,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.87,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.92,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.09,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.07,
+          "type": "noul"
+        }
+      },
+      "case_id": "c10",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Compare JSONResponse and HTMLResponse implementations then who depends on them",
+      "tier": "complex"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "mixed",
+          "confidence": 0.98,
+          "probabilities": {
+            "comparison": 0.01,
+            "explanation": 0.0,
+            "indexing": 0.01,
+            "lookup": 0.0,
+            "mixed": 0.98,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.89,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.9,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.97,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.1,
+          "type": "noul"
+        }
+      },
+      "case_id": "c11",
+      "expected_agents": [
+        "indexer",
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Reindex the repository and compare FastAPI and APIRouter implementations",
+      "tier": "complex"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "mixed",
+          "confidence": 0.46,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.02,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.54,
+            "pattern": 0.0,
+            "relationship": 0.44
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.91,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.94,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.11,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.08,
+          "type": "noul"
+        }
+      },
+      "case_id": "c12",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Explain how WebSocket and APIRoute connect across the codebase and who calls them",
+      "tier": "complex"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 1.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.62,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.28,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.06,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.06,
+          "type": "noul"
+        }
+      },
+      "case_id": "t01",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": true,
+      "query": "How does Django's ORM lazy-load querysets?",
+      "tier": "trap"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 0.99,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.99,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.01,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.5,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.05,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.05,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.06,
+          "type": "noul"
+        }
+      },
+      "case_id": "t02",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": true,
+      "query": "Explain React's useEffect cleanup",
+      "tier": "trap"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 0.97,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.98,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.02,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.77,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.78,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.07,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.06,
+          "type": "noul"
+        }
+      },
+      "case_id": "t03",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": true,
+      "query": "How does Rails ActiveRecord implement callbacks?",
+      "tier": "trap"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 1.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.16,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.05,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.04,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.05,
+          "type": "noul"
+        }
+      },
+      "case_id": "t04",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": true,
+      "query": "Explain Kubernetes pod scheduling",
+      "tier": "trap"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 1.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.17,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.07,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.05,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.05,
+          "type": "noul"
+        }
+      },
+      "case_id": "t05",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": true,
+      "query": "How does PostgreSQL write-ahead logging work?",
+      "tier": "trap"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 1.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.75,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.51,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.07,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.06,
+          "type": "noul"
+        }
+      },
+      "case_id": "t06",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": true,
+      "query": "Explain TensorFlow GradientTape internals",
+      "tier": "trap"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.98,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.02,
+            "indexing": 0.0,
+            "lookup": 0.98,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.27,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.27,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.07,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.06,
+          "type": "noul"
+        }
+      },
+      "case_id": "mt01:1",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "What is the FastAPI class?",
+      "tier": "multi-turn"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.82,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.15,
+            "indexing": 0.0,
+            "lookup": 0.85,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.56,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.5,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.06,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.66,
+          "type": "noul"
+        }
+      },
+      "case_id": "mt01:2",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "What about its parameters?",
+      "tier": "multi-turn"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.86,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.12,
+            "indexing": 0.0,
+            "lookup": 0.88,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.31,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.24,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.06,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.05,
+          "type": "noul"
+        }
+      },
+      "case_id": "mt02:1",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "What is APIRouter?",
+      "tier": "multi-turn"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "relationship",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 1.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.38,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.62,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.06,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.53,
+          "type": "noul"
+        }
+      },
+      "case_id": "mt02:2",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "Who depends on it?",
+      "tier": "multi-turn"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.0,
+            "indexing": 0.0,
+            "lookup": 1.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.22,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.87,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.07,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.07,
+          "type": "noul"
+        }
+      },
+      "case_id": "mt03:1",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "Where is get_openapi?",
+      "tier": "multi-turn"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 1.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.87,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.92,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.13,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.37,
+          "type": "noul"
+        }
+      },
+      "case_id": "mt03:2",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Explain how that is implemented in the codebase",
+      "tier": "multi-turn"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.79,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.16,
+            "indexing": 0.0,
+            "lookup": 0.83,
+            "mixed": 0.0,
+            "pattern": 0.01,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.27,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.2,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.07,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.07,
+          "type": "noul"
+        }
+      },
+      "case_id": "mt04:1",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "What is Depends?",
+      "tier": "multi-turn"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "pattern",
+          "confidence": 0.53,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.09,
+            "indexing": 0.0,
+            "lookup": 0.31,
+            "mixed": 0.01,
+            "pattern": 0.59,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.68,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.93,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.09,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.49,
+          "type": "noul"
+        }
+      },
+      "case_id": "mt04:2",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Show me examples of that from the codebase",
+      "tier": "multi-turn"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.94,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.05,
+            "indexing": 0.0,
+            "lookup": 0.95,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.29,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.26,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.06,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.06,
+          "type": "noul"
+        }
+      },
+      "case_id": "mt05:1",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "What is HTTPException?",
+      "tier": "multi-turn"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "explanation",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 1.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.79,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.86,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.08,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.18,
+          "type": "noul"
+        }
+      },
+      "case_id": "mt05:2",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "How does it work in the source?",
+      "tier": "multi-turn"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.62,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.32,
+            "indexing": 0.0,
+            "lookup": 0.68,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.08,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.06,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.05,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.05,
+          "type": "noul"
+        }
+      },
+      "case_id": "mt06:1",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "What is WebSocket?",
+      "tier": "multi-turn"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "comparison",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 1.0,
+            "explanation": 0.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.9,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.93,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.12,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.36,
+          "type": "noul"
+        }
+      },
+      "case_id": "mt06:2",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Compare that and APIRoute implementations in the codebase",
+      "tier": "multi-turn"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.99,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.0,
+            "indexing": 0.0,
+            "lookup": 1.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.21,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.91,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.09,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.08,
+          "type": "noul"
+        }
+      },
+      "case_id": "mt07:1",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "Find BackgroundTasks",
+      "tier": "multi-turn"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "relationship",
+          "confidence": 1.0,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.0,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 1.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.34,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.92,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.07,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.32,
+          "type": "noul"
+        }
+      },
+      "case_id": "mt07:2",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "What classes inherit from it?",
+      "tier": "multi-turn"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "lookup",
+          "confidence": 0.96,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.03,
+            "indexing": 0.0,
+            "lookup": 0.97,
+            "mixed": 0.0,
+            "pattern": 0.0,
+            "relationship": 0.0
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.31,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.3,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.06,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.07,
+          "type": "noul"
+        }
+      },
+      "case_id": "mt08:1",
+      "expected_agents": [
+        "graph_query"
+      ],
+      "out_of_scope": false,
+      "query": "What is UploadFile?",
+      "tier": "multi-turn"
+    },
+    {
+      "answers": {
+        "intent": {
+          "choice": "relationship",
+          "confidence": 0.93,
+          "probabilities": {
+            "comparison": 0.0,
+            "explanation": 0.01,
+            "indexing": 0.0,
+            "lookup": 0.0,
+            "mixed": 0.05,
+            "pattern": 0.0,
+            "relationship": 0.94
+          },
+          "type": "choice"
+        },
+        "needs_code_analyst": {
+          "noul": 0.89,
+          "type": "noul"
+        },
+        "needs_graph_query": {
+          "noul": 0.88,
+          "type": "noul"
+        },
+        "needs_indexer": {
+          "noul": 0.1,
+          "type": "noul"
+        },
+        "needs_memory": {
+          "noul": 0.36,
+          "type": "noul"
+        }
+      },
+      "case_id": "mt08:2",
+      "expected_agents": [
+        "graph_query",
+        "code_analyst"
+      ],
+      "out_of_scope": false,
+      "query": "Explain how that and File connect across the codebase",
+      "tier": "multi-turn"
+    }
+  ]
+}

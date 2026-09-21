@@ -23,6 +23,7 @@ DEFAULT_INDEX_REPORT_PATH = "/tmp/index_report.json"
 DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.5"
 DEFAULT_SYNTHESIS_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_TYPESAFE_BASE_URL = "https://api.typesafe.ai/v1"
 DEFAULT_GRAPH_QUERY_URL = "http://graph_query:8003/mcp"
 DEFAULT_MEMORY_DB_PATH = "/data/memory.db"
 DEFAULT_MEMORY_CACHE_TTL_SECONDS = 24 * 60 * 60
@@ -45,6 +46,12 @@ _SECRET_ENV_KEYS = {
     "NEO4J_PASSWORD",
     "GATEWAY_API_KEY",
     "MCP_SHARED_SECRET",
+    # docker-compose interpolates .env into every container, so API keys are
+    # read from the exported environment only. Listed in all accepted
+    # spellings; see TypeSafeSettings.
+    "TYPESAFE_API_KEY",
+    "JEV_API_KEY",
+    "JEV-API-KEY",
 }
 
 
@@ -371,6 +378,56 @@ class LLMSettings(RepoSettings):
             overlay=parse_prices_json(self.prices_json),
             fallback=fallback,
         )
+
+
+class TypeSafeSettings(RepoSettings):
+    """TypeSafe System One (Jev) settings for the routing backend.
+
+    Read through the normal settings stack, so a key in ``.env`` works without
+    being exported. ``JEV-API-KEY`` is accepted because that spelling is already
+    in use, but it cannot be exported as a shell variable (hyphens are not valid
+    in an identifier), so ``TYPESAFE_API_KEY`` is the portable name.
+    """
+
+    model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)
+
+    api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TYPESAFE_API_KEY",
+            "JEV_API_KEY",
+            "JEV-API-KEY",
+            "api_key",
+        ),
+    )
+    base_url: str = Field(
+        default=DEFAULT_TYPESAFE_BASE_URL,
+        validation_alias=AliasChoices("TYPESAFE_BASE_URL", "base_url"),
+    )
+    agent_threshold: float = Field(
+        default=0.5,
+        validation_alias=AliasChoices(
+            "TYPESAFE_AGENT_THRESHOLD",
+            "JEV_AGENT_THRESHOLD",
+            "agent_threshold",
+        ),
+    )
+
+    @field_validator("agent_threshold")
+    @classmethod
+    def _probability(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("agent_threshold must be a probability in [0, 1]")
+        return value
+
+    @classmethod
+    def from_env(cls) -> TypeSafeSettings:
+        """From env.
+
+        Returns:
+            TypeSafeSettings.
+        """
+        return cls()
 
 
 class AnalysisSettings(ServiceSettings):

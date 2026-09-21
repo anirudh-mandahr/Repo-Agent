@@ -1,0 +1,88 @@
+{
+  "purpose": "routing",
+  "captured_at": "2026-09-21",
+  "price_as_of": "2026-08-18",
+  "repeats": 3,
+  "n_queries": 58,
+  "notes": [
+    "Router bake-off calls the routing prompt directly; Neo4j is not used.",
+    "Production routing is rules-first; this table scores the LLM router in isolation.",
+    "Quality is exact-match on expected_agents (set equality).",
+    "Schema-failure rate is 1 \u2212 first-attempt schema-validity."
+  ],
+  "rows": [
+    {
+      "model": "anthropic/claude-sonnet-4.5",
+      "quality": {
+        "mean": 0.5192307692307693,
+        "spread": 0.0,
+        "values": [
+          0.5192307692307693,
+          0.5192307692307693,
+          0.5192307692307693
+        ]
+      },
+      "trap_pass": {
+        "mean": 0.6666666666666666,
+        "spread": 0.0,
+        "values": [
+          0.6666666666666666,
+          0.6666666666666666,
+          0.6666666666666666
+        ]
+      },
+      "schema_failure": {
+        "mean": 0.0,
+        "spread": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "p50_latency_ms": {
+        "mean": 3559.7863471581754,
+        "spread": 113.25857299380004,
+        "values": [
+          3438.7109164963476,
+          3575.4200624942314,
+          3665.2280624839477
+        ]
+      },
+      "p95_latency_ms": {
+        "mean": 4552.861485655497,
+        "spread": 120.79409194848222,
+        "values": [
+          4410.635156228091,
+          4652.223340125055,
+          4595.725960613345
+        ]
+      },
+      "cost_per_query": {
+        "mean": 0.005478568965517241,
+        "spread": 1.3060344827585824e-05,
+        "values": [
+          0.005488913793103448,
+          0.005483999999999999,
+          0.0054627931034482765
+        ]
+      },
+      "cost_per_1000": {
+        "mean": 5.478568965517241,
+        "spread": 0.013060344827585824,
+        "values": [
+          5.488913793103448,
+          5.483999999999999,
+          5.462793103448276
+        ]
+      },
+      "rates": {
+        "prompt_usd_per_million": 3.0,
+        "completion_usd_per_million": 15.0,
+        "cached_prompt_usd_per_million": 0.3
+      },
+      "price_label": "anthropic/claude-sonnet-4.5: $3.000 in / $15.000 out / $0.300 cached per 1M (as of 2026-08-18)",
+      "repeats": 3
+    }
+  ]
+}

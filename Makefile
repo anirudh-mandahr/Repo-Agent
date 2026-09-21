@@ -1,4 +1,4 @@
-.PHONY: up down test test-all index lint smoke prove-incremental smoke-day3 eval eval-live tokens-report eval-models
+.PHONY: up down test test-all index lint smoke prove-incremental smoke-day3 eval eval-live tokens-report eval-models eval-routing-jev
 
 .env:
 	cp .env.example .env
@@ -57,6 +57,15 @@ tokens-report:
 eval-models:
 	uv sync --all-packages --group dev
 	PYTHONUNBUFFERED=1 uv run python scripts/eval_models.py --write-readme
+
+# Routing-only head-to-head: Sonnet 4.5 (OpenRouter) vs Jev (TypeSafe).
+# Needs both OPENROUTER_API_KEY and TYPESAFE_API_KEY exported.
+eval-routing-jev:
+	uv sync --all-packages --group dev
+	@test -n "$$OPENROUTER_API_KEY" || (echo "eval-routing-jev requires OPENROUTER_API_KEY" && exit 1)
+	PYTHONUNBUFFERED=1 uv run python scripts/eval_models.py \
+		--purpose routing \
+		--models anthropic/claude-sonnet-4.5,typesafe/jev-latest
 
 lint:
 	uv sync --all-packages --group dev

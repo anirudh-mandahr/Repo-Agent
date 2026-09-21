@@ -26,9 +26,22 @@ Live LLM run over all 58 labelled turns in `evals/qa.jsonl` (2026-09-03). Full s
 | `retrieval_correctness` | 0.99 | 52 | FAIL |
 <!-- END_EVAL_SUMMARY -->
 
-**Suite totals** (same run): 55/58 turns passed, 795,635 tokens, $2.07, mean latency 15,524 ms. Routing is `anthropic/claude-sonnet-4.5`, synthesis `openai/gpt-4.1-mini` — chosen from a measured bake-off (89% synthesis quality at 11.7s p95 and $1.18/1k, versus sonnet-4.5's 82% at 19.9s and $14.43/1k). See [docs/regression-2026-08-20.md](docs/regression-2026-08-20.md) for the run-over-run comparison.
+**Suite totals** (same run): 55/58 turns passed, 795,635 tokens, $2.07, mean latency 15,524 ms. Synthesis is `openai/gpt-4.1-mini` — chosen from a measured bake-off (89% synthesis quality at 11.7s p95 and $1.18/1k, versus sonnet-4.5's 82% at 19.9s and $14.43/1k). See [docs/regression-2026-08-20.md](docs/regression-2026-08-20.md) for the run-over-run comparison.
 
-**Offline suite** (`make test`, no Docker, no API key, StubProvider): 496 passed, 8,951 statements, **87.25% coverage** against a 79% gate.
+**Routing** moved to `typesafe/jev-latest` on 2026-09-21, replacing `anthropic/claude-sonnet-4.5`. Same 58 turns, 3 repeats, temperature 0 (`evals/bakeoffs/`):
+
+| Routing model | Quality | Trap pass | p50 | p95 | Cost / 1k |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `typesafe/jev-latest` | **68% ± 1%** | 61% ± 8% | 1,043 ms | **1,347 ms** | **$0.0376** |
+| `anthropic/claude-sonnet-4.5` | 52% | 67% | 3,560 ms | 4,553 ms | $5.4786 |
+
+Jev is a System One model: it returns typed judgments, not JSON. `intent` is one Choice, `target_agents` is one Noul per agent thresholded in code, and `entities` / `reasoning` come from the existing rule extractor rather than the model. The threshold is 0.5, kept after a sweep (`scripts/sweep_jev_threshold.py`) found quality flat to within one case across 0.40–0.60.
+
+Two things bound that 68%. Production routing is **rules-first**, so this scores the LLM router in isolation over all 58 turns, while in production only queries the keyword rules cannot resolve reach the model. And the trap column spans 6 cases — see Known limitations.
+
+**The scorecard above predates the routing switch.** It is a 2026-09-03 live run on `anthropic/claude-sonnet-4.5` routing and has not been re-run since.
+
+**Offline suite** (`make test`, no Docker, no API key, StubProvider): 588 passed, 9,665 statements, **87.48% coverage** against a 79% gate.
 
 **Indexed graph** (FastAPI @ 2026-09-02): 1,138 files, 17,188 nodes, 22,359 relationships.
 
@@ -149,6 +162,8 @@ LLM spend is treated as a budget to engineer against. The offline suite (`make t
 | Coreference | Regex pronouns + entity carry from recent user turns and the folded summary. No model-based resolution |
 | Third-party symbols | Names defined in starlette have no graph node. `find_entity` falls back to the FastAPI module that re-exports them |
 | Concept-to-entity mapping | `_CONCEPT_ENTITIES` covers dependency injection, request lifecycle, and request validation. Purely conceptual queries outside that table still miss labelled entities |
+| Bake-off schema-failure column | `_route_once` sets `schema_failed=True` in a bare `except Exception`, so transport and API errors are counted as schema failures. The column's own footnote ("1 − first-attempt schema-validity") is therefore wrong whenever a run hits network errors, and it is structurally wrong for any provider that returns typed judgments rather than JSON — that arm cannot fail schema validation at all, so the column silently reports its API error rate instead. Errored calls also score as wrong routes, depressing that model's quality |
+| Trap metric resolution | `refusal_accuracy` / trap pass rate is computed over the 6 trap rows in `evals/qa.jsonl`, so one case moves the rate by 16.7 points. The metric cannot separate two models at that sample size; differences under ~17 points are noise |
 
 **Future work:** a Redis/SQS job queue replacing the in-process index registry, for durability across restarts and cross-replica coordination; gating the embedding retrieval tier so it only runs when the exact and full-text tiers come up short, rather than on every `find_entity`; model-based coreference; a fitted synthesis-reserve latency slope.
 
