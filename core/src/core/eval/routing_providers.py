@@ -7,27 +7,19 @@ plugs in here rather than in the bake-off itself.
 
 from __future__ import annotations
 
-from typing import Final
-
 from core.eval.model_bakeoff import default_provider_factory
 from core.exceptions import ConfigurationError
-from core.llm.jev_provider import JEV_MODEL_ID, JevRoutingProvider
+from core.llm.jev_provider import JevRoutingProvider
 from core.llm.provider import LLMProvider
+from core.llm.purpose_router import TYPESAFE_PREFIX, is_typesafe_model
 from core.settings import TypeSafeSettings
 
-TYPESAFE_PREFIX: Final = "typesafe/"
-
-
-def is_typesafe_model(model: str) -> bool:
-    """True when ``model`` is served by TypeSafe rather than OpenRouter.
-
-    Args:
-        model: Bake-off model id.
-
-    Returns:
-        bool.
-    """
-    return model == JEV_MODEL_ID or model.startswith(TYPESAFE_PREFIX)
+__all__ = [
+    "TYPESAFE_PREFIX",
+    "is_typesafe_model",
+    "routing_provider_factory",
+    "typesafe_key_present",
+]
 
 
 def routing_provider_factory(

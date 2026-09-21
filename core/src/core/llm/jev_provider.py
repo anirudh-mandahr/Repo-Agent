@@ -366,6 +366,59 @@ class JevRoutingProvider:
         assert last is not None
         raise last
 
+    async def judge(
+        self,
+        query: str,
+        prior_entities: list[str] | None = None,
+        *,
+        agent: str = "orchestrator",
+    ) -> tuple[dict[str, Any], TokenUsage]:
+        """Ask the batched routing questions and return the raw answers.
+
+        Exposed separately from :meth:`complete` because the agent threshold is
+        applied to these probabilities after the fact: one pass over a case set
+        can be replayed at any threshold without re-calling the API.
+
+        Args:
+            query: User question.
+            prior_entities: Entities carried in from earlier turns, if any.
+            agent: Calling agent name, for error reporting.
+
+        Returns:
+            The ``answers`` map and the call's token usage.
+
+        Raises:
+            JevRoutingError: On a failed request or a payload with no answers.
+        """
+        state: dict[str, Any] = {"user_query": query}
+        if prior_entities:
+            state["previously_mentioned_entities"] = list(prior_entities)
+
+        payload = await self._post(
+            {
+                "state": state,
+                "model": _wire_model(self._model),
+                "questions": build_questions(),
+            }
+        )
+        answers = payload.get("answers")
+        if not isinstance(answers, dict):
+            raise JevRoutingError(
+                agent=agent,
+                message="typesafe response contained no answers map",
+            )
+        raw_usage = payload.get("usage") or {}
+        prompt_tokens = int(raw_usage.get("input_tokens") or 0)
+        completion_tokens = int(raw_usage.get("output_tokens") or 0)
+        return answers, TokenUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            estimated=False,
+            model=self._model,
+            cached_prompt_tokens=0,
+        )
+
     async def complete(
         self,
         messages: list[Message],
@@ -404,43 +457,15 @@ class JevRoutingProvider:
             )
 
         query, prior_entities = parse_routing_prompt(messages)
-        state: dict[str, Any] = {"user_query": query}
-        if prior_entities:
-            state["previously_mentioned_entities"] = prior_entities
-
-        payload = await self._post(
-            {
-                "state": state,
-                "model": _wire_model(self._model),
-                "questions": build_questions(),
-            }
-        )
-        answers = payload.get("answers")
-        if not isinstance(answers, dict):
-            raise JevRoutingError(
-                agent=agent,
-                message="typesafe response contained no answers map",
-            )
-
+        answers, usage = await self.judge(query, prior_entities, agent=agent)
         intent = intent_from_answers(
             answers, query, prior_entities, threshold=self._threshold
-        )
-        raw_usage = payload.get("usage") or {}
-        prompt_tokens = int(raw_usage.get("input_tokens") or 0)
-        completion_tokens = int(raw_usage.get("output_tokens") or 0)
-        usage = TokenUsage(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens,
-            estimated=False,
-            model=self._model,
-            cached_prompt_tokens=0,
         )
         log.info(
             "jev.routed",
             intent=intent.intent,
             agents=intent.target_agents,
-            input_tokens=prompt_tokens,
+            input_tokens=usage.prompt_tokens,
         )
         return LLMResult(
             text=intent.model_dump_json(),
