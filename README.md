@@ -149,6 +149,8 @@ LLM spend is treated as a budget to engineer against. The offline suite (`make t
 | Coreference | Regex pronouns + entity carry from recent user turns and the folded summary. No model-based resolution |
 | Third-party symbols | Names defined in starlette have no graph node. `find_entity` falls back to the FastAPI module that re-exports them |
 | Concept-to-entity mapping | `_CONCEPT_ENTITIES` covers dependency injection, request lifecycle, and request validation. Purely conceptual queries outside that table still miss labelled entities |
+| Bake-off schema-failure column | `_route_once` sets `schema_failed=True` in a bare `except Exception`, so transport and API errors are counted as schema failures. The column's own footnote ("1 − first-attempt schema-validity") is therefore wrong whenever a run hits network errors, and it is structurally wrong for any provider that returns typed judgments rather than JSON — that arm cannot fail schema validation at all, so the column silently reports its API error rate instead. Errored calls also score as wrong routes, depressing that model's quality |
+| Trap metric resolution | `refusal_accuracy` / trap pass rate is computed over the 6 trap rows in `evals/qa.jsonl`, so one case moves the rate by 16.7 points. The metric cannot separate two models at that sample size; differences under ~17 points are noise |
 
 **Future work:** a Redis/SQS job queue replacing the in-process index registry, for durability across restarts and cross-replica coordination; gating the embedding retrieval tier so it only runs when the exact and full-text tiers come up short, rather than on every `find_entity`; model-based coreference; a fitted synthesis-reserve latency slope.
 

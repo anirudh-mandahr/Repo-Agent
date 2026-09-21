@@ -74,6 +74,14 @@ CATALOG: dict[str, ModelRates] = {
         completion_usd_per_million=1.60,
         cached_prompt_usd_per_million=0.10,
     ),
+    # TypeSafe System One list price (docs.typesafe.ai/models, as of 2026-09-21):
+    # $0.042 per 1M input tokens, output tokens free. Jev exposes no prompt
+    # cache, so the cached rate equals the uncached one.
+    "typesafe/jev-latest": ModelRates(
+        prompt_usd_per_million=0.042,
+        completion_usd_per_million=0.0,
+        cached_prompt_usd_per_million=0.042,
+    ),
     "google/gemini-2.5-flash": ModelRates(
         prompt_usd_per_million=0.30,
         completion_usd_per_million=2.50,
@@ -189,8 +197,8 @@ def price_label(model: str, rates: ModelRates) -> str:
         Report line including the catalog date.
     """
     return (
-        f"{model}: ${rates.prompt_usd_per_million:.2f} in / "
-        f"${rates.completion_usd_per_million:.2f} out / "
+        f"{model}: ${rates.prompt_usd_per_million:.3f} in / "
+        f"${rates.completion_usd_per_million:.3f} out / "
         f"${rates.cached_prompt_usd_per_million:.3f} cached per 1M "
         f"(as of {PRICE_AS_OF})"
     )

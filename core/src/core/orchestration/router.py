@@ -65,6 +65,22 @@ def _rule_based_entities(query: str) -> list[str]:
     return _dedupe(candidates)
 
 
+def extract_entities(query: str) -> list[str]:
+    """Public wrapper over the heuristic entity extractor.
+
+    Routing backends that do not generate text (see
+    :mod:`core.llm.jev_provider`) fill ``QueryIntent.entities`` from this
+    instead of from the model.
+
+    Args:
+        query: User question.
+
+    Returns:
+        list[str].
+    """
+    return _rule_based_entities(query)
+
+
 _QUERY_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _LOOKUP_FILLER = frozenset(
     {
